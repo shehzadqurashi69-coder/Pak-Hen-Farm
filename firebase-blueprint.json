@@ -1,0 +1,109 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Registered poultry farm user account",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "fullName": { "type": "string" },
+        "phone": { "type": "string" },
+        "easypaisaTitle": { "type": "string" },
+        "easypaisaNumber": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "staff", "user"] },
+        "walletBalance": { "type": "number" },
+        "activeHens": { "type": "number" },
+        "referralCode": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "email", "fullName", "role"]
+    },
+    "HenOrder": {
+      "title": "HenOrder",
+      "description": "Easypaisa package purchase order with TID",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "userEmail": { "type": "string" },
+        "userName": { "type": "string" },
+        "packageId": { "type": "string" },
+        "hensCount": { "type": "number" },
+        "amount": { "type": "number" },
+        "senderEasypaisaNumber": { "type": "string" },
+        "senderEasypaisaTitle": { "type": "string" },
+        "tid": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "submittedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "tid", "status", "amount"]
+    },
+    "Withdrawal": {
+      "title": "Withdrawal",
+      "description": "Easypaisa payout withdrawal request",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "userName": { "type": "string" },
+        "userEmail": { "type": "string" },
+        "amount": { "type": "number" },
+        "eggsEquivalent": { "type": "number" },
+        "easypaisaNumber": { "type": "string" },
+        "easypaisaTitle": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "paid", "rejected"] },
+        "requestedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "amount", "status"]
+    },
+    "EggCollection": {
+      "title": "EggCollection",
+      "description": "Daily 24h egg collection record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "hensCount": { "type": "number" },
+        "eggsCollected": { "type": "number" },
+        "cashEarned": { "type": "number" }
+      },
+      "required": ["id", "userId", "eggsCollected", "cashEarned"]
+    },
+    "FarmStats": {
+      "title": "FarmStats",
+      "description": "Global physical farm production stats",
+      "type": "object",
+      "properties": {
+        "totalCollected": { "type": "number" },
+        "cracked": { "type": "number" },
+        "netFresh": { "type": "number" },
+        "lastUpdated": { "type": "string", "format": "date-time" }
+      },
+      "required": ["totalCollected", "cracked", "netFresh"]
+    }
+  },
+  "firestore": {
+    "users": {
+      "entity": "User",
+      "description": "Global user accounts directory"
+    },
+    "orders": {
+      "entity": "HenOrder",
+      "description": "Global package orders and TID approvals"
+    },
+    "withdrawals": {
+      "entity": "Withdrawal",
+      "description": "Global payout withdrawal requests"
+    },
+    "collections": {
+      "entity": "EggCollection",
+      "description": "Egg collection records"
+    },
+    "stats": {
+      "entity": "FarmStats",
+      "description": "Global farm statistics"
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "Pak Hen Farm",
+  "description": "Pak Hen Farm is a 100% real physical poultry farm providing services all over Pakistan. Shariah-compliant Mudarabah flock partnerships, daily egg collection, and USDT deposits.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

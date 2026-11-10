@@ -1,0 +1,85 @@
+{
+  "users": [
+    {
+      "id": "USR-MVWOQ99F-209",
+      "email": "kamran@gmail.com",
+      "password": "pass1234",
+      "fullName": "Kamran Khan",
+      "phone": "03119876543",
+      "easypaisaTitle": "Kamran Khan",
+      "easypaisaNumber": "03119876543",
+      "role": "user",
+      "walletBalance": 60,
+      "activeHens": 2,
+      "referralCode": "PHF-KAMR-8000",
+      "createdAt": "2026-10-31T17:38:36.004Z",
+      "packages": [
+        {
+          "id": "PKG-1793468437133",
+          "packageId": "pkg-2",
+          "hens": 2,
+          "purchasePrice": 1800,
+          "purchasedAt": "2026-10-31T17:39:06.034Z",
+          "approvedAt": "2026-10-31T17:40:37.133Z",
+          "expiresAt": "2027-01-29T17:40:37.133Z",
+          "tid": "EP-KAMRAN-7711",
+          "active": true
+        }
+      ],
+      "lastEggCollectionAt": "2026-10-31T17:41:39.607Z"
+    },
+    {
+      "id": "ADMIN-1793468380991",
+      "email": "shehzadqurashi9@gmail.com",
+      "password": "admin123",
+      "fullName": "Farm Administrator (Shehzad)",
+      "phone": "03105625924",
+      "easypaisaTitle": "Shehzad",
+      "easypaisaNumber": "03128683770",
+      "role": "admin",
+      "walletBalance": 0,
+      "activeHens": 0,
+      "referralCode": "PHF-ADMIN",
+      "createdAt": "2026-10-31T17:39:40.991Z",
+      "packages": []
+    }
+  ],
+  "orders": [
+    {
+      "userId": "USR-MVWOQ99F-209",
+      "userEmail": "kamran@gmail.com",
+      "userName": "Kamran Khan",
+      "userPhone": "03119876543",
+      "packageId": "pkg-2",
+      "hensCount": 2,
+      "amount": 1800,
+      "senderEasypaisaNumber": "03119876543",
+      "senderEasypaisaTitle": "Kamran Khan",
+      "tid": "EP-KAMRAN-7711",
+      "id": "ORD-MVWOQWFM-835",
+      "status": "approved",
+      "submittedAt": "2026-10-31T17:39:06.034Z",
+      "reviewedAt": "2026-10-31T17:40:37.133Z",
+      "adminNote": "Verified and approved by Admin"
+    }
+  ],
+  "withdrawals": [],
+  "collections": [
+    {
+      "id": "EGG-1793468499607",
+      "userId": "USR-MVWOQ99F-209",
+      "timestamp": "2026-10-31T17:41:39.607Z",
+      "date": "2026-10-31",
+      "hensCount": 2,
+      "eggsCollected": 2,
+      "cashEarned": 60
+    }
+  ],
+  "tickets": [],
+  "globalStats": {
+    "totalCollected": 0,
+    "cracked": 0,
+    "netFresh": 0,
+    "lastUpdated": "2026-10-31T17:38:36.003Z"
+  }
+}
