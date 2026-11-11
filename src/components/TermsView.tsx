@@ -68,33 +68,33 @@ export const TermsView: React.FC<TermsViewProps> = ({ lang }) => {
           </p>
         </div>
 
-        {/* Section 4: Withdrawal Limits */}
+        {/* Section 4: Withdrawal Limits & Supported Gateways */}
         <div className="space-y-2 border-b border-[#d4af37]/20 pb-5">
           <div className="flex items-center gap-2 text-[#d4af37]">
             <Scale className="h-5 w-5" />
             <h3 className="text-lg font-bold">
-              {isUr ? '4. ایزی پیسہ نکلوائی کی حدود و شرائط' : '4. Easypaisa Withdrawal Policy & Strict Limits'}
+              {isUr ? '4. فنڈز نکلوائی کی حدود و طریقہ کار (تمام گیٹ ویز)' : '4. Fund Withdrawal Policy & Gateway Limits'}
             </h3>
           </div>
           <p className="text-xs sm:text-sm text-[#f4efe6]/80 leading-relaxed">
             {isUr
-              ? `نکلوائی کی رقم کے لیے سخت قوانین لاگو ہیں: کم از کم رقم ${MIN_WITHDRAWAL_EGGS} انڈے (Rs. ${MIN_WITHDRAWAL_PKR}) اور زیادہ سے زیادہ رقم ${MAX_WITHDRAWAL_EGGS} انڈے (Rs. ${MAX_WITHDRAWAL_PKR.toLocaleString()}) فی درخواست ہے۔ ادائیگیاں ایڈمن کی تصدیق کے بعد براہِ راست آپ کے ایزی پیسہ اکاؤنٹ میں بھیجی جاتی ہیں۔`
-              : `Payouts are subject to strict limits: Minimum withdrawal is ${MIN_WITHDRAWAL_EGGS} Eggs (Rs. ${MIN_WITHDRAWAL_PKR}) and maximum is ${MAX_WITHDRAWAL_EGGS} Eggs (Rs. ${MAX_WITHDRAWAL_PKR.toLocaleString()}) per request. Payouts are manually disbursed by the farm administrator to verified Easypaisa accounts.`}
+              ? `نکلوائی کی رقم کے لیے شفاف قوانین لاگو ہیں: کم از کم رقم ${MIN_WITHDRAWAL_EGGS} انڈے (Rs. ${MIN_WITHDRAWAL_PKR}) اور زیادہ سے زیادہ رقم ${MAX_WITHDRAWAL_EGGS} انڈے (Rs. ${MAX_WITHDRAWAL_PKR.toLocaleString()}) فی درخواست ہے۔ ممبران اپنے تمام فعال پیمنٹ اکاؤنٹس بشمول ایزی پیسہ (Easypaisa)، جاز کیش (JazzCash)، سادہ پے (SadaPay)، یو پیسہ (UPaisa)، اور بینک اکاؤنٹ / راست (Raast) پر بغیر کسی تاخیر کے براہِ راست ادائیگیاں حاصل کر سکتے ہیں۔ ادائیگیاں فارم ایڈمنسٹریشن کی تصدیق کے بعد فوری بھیجی جاتی ہیں۔`
+              : `Payouts are subject to clear policy limits: Minimum withdrawal is ${MIN_WITHDRAWAL_EGGS} Eggs (Rs. ${MIN_WITHDRAWAL_PKR}) and maximum is ${MAX_WITHDRAWAL_EGGS} Eggs (Rs. ${MAX_WITHDRAWAL_PKR.toLocaleString()}) per request. Members can request instant payouts to any active payment gateway of their choice, including Easypaisa, JazzCash, SadaPay, UPaisa, or direct Bank Account / Raast. All verified payout requests are processed seamlessly by farm administration.`}
           </p>
         </div>
 
-        {/* Section 5: Official Contact & Dispute Resolution */}
+        {/* Section 5: Deposit Verification & Support */}
         <div className="space-y-2">
           <div className="flex items-center gap-2 text-[#d4af37]">
             <ShieldCheck className="h-5 w-5" />
             <h3 className="text-lg font-bold">
-              {isUr ? '5. ادائیگی اور آفیشل سپورٹ' : '5. Deposit Verification & Official Support'}
+              {isUr ? '5. ڈپازٹ، پیکج ایکٹیویشن اور آفیشل سپورٹ' : '5. Deposit Verification, Package Activation & Support'}
             </h3>
           </div>
           <p className="text-xs sm:text-sm text-[#f4efe6]/80 leading-relaxed">
             {isUr
-              ? `ڈپازٹ کی تمام ادائیگیاں صرف آفیشل یو ایس ڈی ٹی TRC20 والٹ ایڈریس (${OFFICIAL_INFO.usdtTrc20Address}) پر قبول کی جاتی ہیں۔ کسی بھی سوال یا مسئلے کی صورت میں فارم سپورٹ ڈیسک پر انکوائری جمع کروائیں۔`
-              : `All payments must be submitted exclusively to the official USDT (TRC20) address: ${OFFICIAL_INFO.usdtTrc20Address}. For any assistance, submit a support inquiry through our dedicated farm helpdesk.`}
+              ? `مرغیوں کے پیکج کی خریداری کے لیے تمام ادائیگیاں فارم کی طرف سے فراہم کردہ مصدقہ آفیشل پیمنٹ اکاؤنٹس (جاز کیش، ایزی پیسہ، سادہ پے، یو پیسہ، بینک ٹرانسفر / راست) پر کی جاتی ہیں۔ ادائیگی کے بعد ٹرانزیکشن آئی ڈی (TID) اور رسید کا اسکرین شاٹ پورٹل میں درج کرنا لازمی ہے۔ ایڈمن کی تصدیق کے فوری بعد آپ کا پیکج اور روزانہ کی انڈوں کی پیداوار فعال ہو جاتی ہے۔ کسی بھی مدد کے لیے فارم کے SOS ہیلپ ڈیسک پر رابطہ کریں۔`
+              : `Flock package purchases may be funded via any official farm payment gateway displayed during checkout (including JazzCash, Easypaisa, SadaPay, UPaisa, or direct Bank Transfer / Raast). Users must submit their valid Transaction ID (TID) or transfer screenshot for instant verification. Upon administrative approval, your active hens and daily egg yield cycle begin immediately. For any assistance, reach out via our 24/7 Farm SOS Support.`}
           </p>
         </div>
       </div>

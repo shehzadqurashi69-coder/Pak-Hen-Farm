@@ -10,6 +10,8 @@ import {
   PaymentMethodType,
   PaymentSettings,
   SupportTicket,
+  FarmBanner,
+  FarmGalleryItem,
 } from '../types/farm';
 import {
   apiGetOrders,
@@ -42,8 +44,16 @@ import {
   apiApproveMedicalPayment,
   apiRejectMedicalPayment,
   apiSendAdminCustomMessage,
+  subscribeToBanners,
+  cloudSaveBanners,
+  cloudUpdateBanner,
+  subscribeToGallery,
+  cloudSaveGallery,
+  cloudAddGalleryItem,
+  cloudDeleteGalleryItem,
+  cloudToggleGalleryItemActive,
 } from '../services/api';
-import { INITIAL_SHEDS, SHED_CAPACITY, MEDICAL_FEE_PKR, calculateShedDynamicSum } from '../utils/farmRules';
+import { INITIAL_SHEDS, SHED_CAPACITY, MEDICAL_FEE_PKR, calculateShedDynamicSum, DEFAULT_BANNERS, DEFAULT_GALLERY_ITEMS } from '../utils/farmRules';
 import { t } from '../utils/translations';
 import {
   ShieldCheck,
@@ -91,6 +101,10 @@ import {
   Smartphone,
   Eye,
   RotateCcw,
+  Images,
+  Film,
+  Video,
+  Play,
 } from 'lucide-react';
 
 interface AdminPortalProps {
@@ -103,7 +117,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang }) => 
   const isUr = lang === 'ur';
 
   const [activeTab, setActiveTab] = useState<
-    'orders' | 'withdrawals' | 'payment_methods' | 'sos_inbox' | 'medical' | 'sheds' | 'users' | 'stats'
+    'orders' | 'withdrawals' | 'payment_methods' | 'banners' | 'gallery' | 'sos_inbox' | 'medical' | 'sheds' | 'users' | 'stats'
   >('orders');
 
   const [orders, setOrders] = useState<HenOrder[]>([]);
@@ -134,6 +148,28 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang }) => 
   const [pmActionMessage, setPmActionMessage] = useState<string | null>(null);
   const [pmErrorMessage, setPmErrorMessage] = useState<string | null>(null);
   const [isSavingPm, setIsSavingPm] = useState(false);
+
+  // Ads Banner Management State (Requirement 1: Admin Image Banner Slider / Ads System)
+  const [bannersList, setBannersList] = useState<FarmBanner[]>(DEFAULT_BANNERS);
+  const [isSavingBanners, setIsSavingBanners] = useState(false);
+  const [bannerFeedbackMsg, setBannerFeedbackMsg] = useState<string | null>(null);
+  const [editingBannerId, setEditingBannerId] = useState<string | null>(null);
+
+  // Farm Gallery Management State (Requirement 2: Admin Media & Video Management)
+  const [galleryList, setGalleryList] = useState<FarmGalleryItem[]>(DEFAULT_GALLERY_ITEMS);
+  const [isSavingGallery, setIsSavingGallery] = useState(false);
+  const [galleryFeedbackMsg, setGalleryFeedbackMsg] = useState<string | null>(null);
+  const [galleryFilterTab, setGalleryFilterTab] = useState<'all' | 'photo' | 'video'>('all');
+  const [newGalleryType, setNewGalleryType] = useState<'photo' | 'video'>('photo');
+  const [newGalleryTitle, setNewGalleryTitle] = useState('');
+  const [newGalleryTitleUr, setNewGalleryTitleUr] = useState('');
+  const [newGalleryMediaUrl, setNewGalleryMediaUrl] = useState('');
+  const [newGalleryThumbnailUrl, setNewGalleryThumbnailUrl] = useState('');
+  const [newGalleryCaption, setNewGalleryCaption] = useState('');
+  const [newGalleryCaptionUr, setNewGalleryCaptionUr] = useState('');
+  const [newGalleryDuration, setNewGalleryDuration] = useState('');
+  const [newGalleryLocation, setNewGalleryLocation] = useState('Islamabad Physical Farm (Shed-101)');
+  const [isUploadingGalleryFile, setIsUploadingGalleryFile] = useState(false);
 
   // Custom Admin Greeting for User Checkout Screen (Requirement 2)
   const [customGreeting, setCustomGreeting] = useState('');
@@ -274,6 +310,20 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang }) => 
       }
     });
 
+    // 10. Live Ads Banners subscription
+    const unsubBanners = subscribeToBanners((liveBanners) => {
+      if (liveBanners && liveBanners.length > 0) {
+        setBannersList(liveBanners);
+      }
+    });
+
+    // 11. Live Farm Gallery subscription (Photos & Videos)
+    const unsubGallery = subscribeToGallery((liveItems) => {
+      if (liveItems && liveItems.length > 0) {
+        setGalleryList(liveItems);
+      }
+    });
+
     return () => {
       unsubOrders();
       unsubUsers();
@@ -284,6 +334,8 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang }) => 
       unsubPm();
       unsubTickets();
       unsubSettings();
+      unsubBanners();
+      unsubGallery();
     };
   }, [adminUser.id, selectedShedId]);
 
@@ -548,6 +600,176 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang }) => 
       await apiUpdatePaymentMethod(adminUser, pm.id, { active: !pm.active });
     } catch (err: any) {
       setPmErrorMessage(err.message || 'Error toggling payment method');
+    }
+  };
+
+  // Ads Banner Management Handlers (Requirement 1: Admin Panel Ads System)
+  const handleUpdateBannerField = (bannerId: string, field: keyof FarmBanner, value: any) => {
+    setBannersList((prev) =>
+      prev.map((b) => (b.id === bannerId ? { ...b, [field]: value } : b))
+    );
+  };
+
+  const handleBannerFileUpload = (bannerId: string, file: File) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const dataUrl = e.target?.result as string;
+      if (dataUrl) {
+        handleUpdateBannerField(bannerId, 'imageUrl', dataUrl);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleSaveBanner = async (banner: FarmBanner) => {
+    try {
+      setIsSavingBanners(true);
+      await cloudUpdateBanner(banner);
+      setBannerFeedbackMsg(isUr ? 'بینر کامیابی سے اپ ڈیٹ ہو گیا!' : `Banner #${banner.order} saved successfully!`);
+      setTimeout(() => setBannerFeedbackMsg(null), 3500);
+    } catch (err: any) {
+      alert(err.message || 'Error updating banner');
+    } finally {
+      setIsSavingBanners(false);
+    }
+  };
+
+  const handleSaveAllBanners = async () => {
+    try {
+      setIsSavingBanners(true);
+      await cloudSaveBanners(bannersList);
+      setBannerFeedbackMsg(isUr ? 'تمام بینرز کامیابی سے محفوظ ہو گئے!' : 'All 4 banners saved and synced live!');
+      setTimeout(() => setBannerFeedbackMsg(null), 3500);
+    } catch (err: any) {
+      alert(err.message || 'Error saving banners');
+    } finally {
+      setIsSavingBanners(false);
+    }
+  };
+
+  const handleResetBanners = async () => {
+    try {
+      setIsSavingBanners(true);
+      await cloudSaveBanners(DEFAULT_BANNERS);
+      setBannersList(DEFAULT_BANNERS);
+      setBannerFeedbackMsg(isUr ? 'بینرز اصل حالت پر بحال کر دیے گئے۔' : 'Banners reset to default high-definition images.');
+      setTimeout(() => setBannerFeedbackMsg(null), 3500);
+    } catch (err: any) {
+      setBannerFeedbackMsg(err.message || 'Error resetting banners');
+    } finally {
+      setIsSavingBanners(false);
+    }
+  };
+
+  // Farm Gallery Management Handlers (Requirement 2: Admin Media & Video Management)
+  const handleGalleryFileUpload = (file: File) => {
+    if (!file) return;
+    setIsUploadingGalleryFile(true);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const result = e.target?.result as string;
+      if (result) {
+        setNewGalleryMediaUrl(result);
+        if (newGalleryType === 'photo') {
+          setNewGalleryThumbnailUrl(result);
+        }
+      }
+      setIsUploadingGalleryFile(false);
+    };
+    reader.onerror = () => {
+      setIsUploadingGalleryFile(false);
+      setGalleryFeedbackMsg('Failed to read file from device.');
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleAddGalleryMedia = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newGalleryTitle.trim()) {
+      setGalleryFeedbackMsg(isUr ? 'براہ کرم میڈیا کا عنوان درج کریں' : 'Please enter a title for this media.');
+      return;
+    }
+    if (!newGalleryMediaUrl.trim()) {
+      setGalleryFeedbackMsg(isUr ? 'براہ کرم تصویر/ویڈیو فائل منتخب کریں یا URL درج کریں' : 'Please provide a media URL or upload a file.');
+      return;
+    }
+
+    try {
+      setIsSavingGallery(true);
+      const newItem: FarmGalleryItem = {
+        id: `media_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        type: newGalleryType,
+        title: newGalleryTitle.trim(),
+        titleUr: newGalleryTitleUr.trim() || undefined,
+        mediaUrl: newGalleryMediaUrl.trim(),
+        thumbnailUrl: newGalleryThumbnailUrl.trim() || (newGalleryType === 'photo' ? newGalleryMediaUrl.trim() : undefined),
+        caption: newGalleryCaption.trim() || undefined,
+        captionUr: newGalleryCaptionUr.trim() || undefined,
+        duration: newGalleryType === 'video' ? (newGalleryDuration.trim() || '01:30') : undefined,
+        location: newGalleryLocation.trim() || 'Pak Hen Farm (Official)',
+        uploadedAt: new Date().toISOString(),
+        createdAt: new Date().toISOString(),
+        active: true,
+        isActive: true,
+        order: galleryList.length + 1,
+        likesCount: 0,
+      };
+
+      await cloudAddGalleryItem(newItem);
+      setGalleryFeedbackMsg(isUr ? 'میڈیا کامیابی سے فارم گیلری میں شامل کر دیا گیا!' : 'New media added to Farm Gallery successfully!');
+      // Reset form
+      setNewGalleryTitle('');
+      setNewGalleryTitleUr('');
+      setNewGalleryMediaUrl('');
+      setNewGalleryThumbnailUrl('');
+      setNewGalleryCaption('');
+      setNewGalleryCaptionUr('');
+      setNewGalleryDuration('');
+      setTimeout(() => setGalleryFeedbackMsg(null), 3500);
+    } catch (err: any) {
+      setGalleryFeedbackMsg(err.message || 'Error adding media to gallery');
+    } finally {
+      setIsSavingGallery(false);
+    }
+  };
+
+  const handleDeleteGalleryMedia = async (id: string) => {
+    try {
+      setIsSavingGallery(true);
+      await cloudDeleteGalleryItem(id);
+      setGalleryList((prev) => prev.filter((item) => item.id !== id));
+      setGalleryFeedbackMsg(isUr ? 'میڈیا آئٹم گیلری سے حذف کر دیا گیا۔' : 'Media item deleted successfully from gallery.');
+      setTimeout(() => setGalleryFeedbackMsg(null), 3500);
+    } catch (err: any) {
+      setGalleryFeedbackMsg(err.message || 'Error deleting media');
+    } finally {
+      setIsSavingGallery(false);
+    }
+  };
+
+  const handleToggleGalleryMediaActive = async (id: string, active: boolean) => {
+    try {
+      await cloudToggleGalleryItemActive(id, active);
+      setGalleryList((prev) =>
+        prev.map((item) => (item.id === id ? { ...item, active, isActive: active } : item))
+      );
+    } catch (err: any) {
+      setGalleryFeedbackMsg(err.message || 'Error updating media visibility');
+    }
+  };
+
+  const handleResetGalleryToDefaults = async () => {
+    try {
+      setIsSavingGallery(true);
+      await cloudSaveGallery(DEFAULT_GALLERY_ITEMS);
+      setGalleryList(DEFAULT_GALLERY_ITEMS);
+      setGalleryFeedbackMsg(isUr ? 'تمام ویڈیوز اور تصاویر اصل حالت پر بحال کر دی گئیں۔' : 'Gallery reset to factory 5 authentic videos and HD photos.');
+      setTimeout(() => setGalleryFeedbackMsg(null), 3500);
+    } catch (err: any) {
+      setGalleryFeedbackMsg(err.message || 'Error resetting gallery');
+    } finally {
+      setIsSavingGallery(false);
     }
   };
 
@@ -872,8 +1094,8 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang }) => 
       </div>
 
       {/* Admin Tabs (Phase 3: 6 Dedicated Tabs) */}
-      {/* Admin Tabs (8 Dedicated Control Tabs) */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2 rounded-2xl bg-[#0a2618] p-1.5 border border-[#d4af37]/30">
+      {/* Admin Tabs (9 Dedicated Control Tabs) */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 lg:grid-cols-9 gap-2 rounded-2xl bg-[#0a2618] p-1.5 border border-[#d4af37]/30">
         <button
           onClick={() => setActiveTab('orders')}
           className={`relative rounded-xl py-2 text-xs font-bold transition-all cursor-pointer ${
@@ -920,6 +1142,42 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang }) => 
             <span>{isUr ? 'اکاؤنٹس' : 'Payments'}</span>
             <span className="rounded-full bg-[#051a10]/60 px-1 text-[10px]">
               {paymentMethods.length}
+            </span>
+          </span>
+        </button>
+
+        {/* Ads Banner Management Tab (Requirement 1: Admin Panel Ads System) */}
+        <button
+          onClick={() => setActiveTab('banners')}
+          className={`relative rounded-xl py-2 text-xs font-bold transition-all cursor-pointer ${
+            activeTab === 'banners'
+              ? 'bg-[#d4af37] text-[#051a10] shadow-md shadow-[#d4af37]/25'
+              : 'text-[#f4efe6]/70 hover:text-[#f4efe6]'
+          }`}
+        >
+          <span className="flex items-center justify-center gap-1">
+            <ImageIcon className="h-3.5 w-3.5" />
+            <span>{isUr ? 'اشتہارات' : 'Banners'}</span>
+            <span className="rounded-full bg-[#051a10]/60 px-1 text-[10px]">
+              {bannersList.length}
+            </span>
+          </span>
+        </button>
+
+        {/* Farm Gallery Management Tab (Requirement 2: Farm Photos & Videos Management) */}
+        <button
+          onClick={() => setActiveTab('gallery')}
+          className={`relative rounded-xl py-2 text-xs font-bold transition-all cursor-pointer ${
+            activeTab === 'gallery'
+              ? 'bg-[#d4af37] text-[#051a10] shadow-md shadow-[#d4af37]/25'
+              : 'text-[#f4efe6]/70 hover:text-[#f4efe6]'
+          }`}
+        >
+          <span className="flex items-center justify-center gap-1">
+            <Images className="h-3.5 w-3.5" />
+            <span>{isUr ? 'فارم گیلری' : 'Gallery'}</span>
+            <span className="rounded-full bg-[#051a10]/60 px-1 text-[10px]">
+              {galleryList.length}
             </span>
           </span>
         </button>
@@ -1973,6 +2231,650 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang }) => 
                 </div>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* TAB: ADS & BANNER SLIDER SYSTEM (Requirement 1: Admin Image Banner Slider) */}
+      {activeTab === 'banners' && (
+        <div className="space-y-6">
+          {/* Header & Status Card */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-gradient-to-r from-[#0a2618] via-[#051a10] to-[#0a2618] p-5 rounded-3xl border border-[#d4af37]/40 shadow-xl">
+            <div>
+              <div className="flex items-center gap-2">
+                <ImageIcon className="h-6 w-6 text-[#d4af37]" />
+                <h3 className="text-lg font-extrabold text-[#f4efe6]">
+                  {isUr ? 'اشتہارات و بینر سلائیڈر کنٹرول (Ads System)' : 'Ads & Banner Slider Management'}
+                </h3>
+              </div>
+              <p className="text-xs text-[#f4efe6]/70 mt-1 max-w-2xl">
+                {isUr
+                  ? 'صارفین کی ہوم اسکرین کے ٹاپ پر چلنے والے 4 بینرز کا کنٹرول۔ آپ کسی بھی وقت نئی تصویر اپ لوڈ کر سکتے ہیں، عنوانات تبدیل کر سکتے ہیں یا ڈیفالٹ پر لا سکتے ہیں۔'
+                  : 'Manage the 4 top image banner slides displayed in the auto-scrolling carousel on the user home screen. Upload custom images or update URLs.'}
+              </p>
+              <div className="mt-2 inline-flex items-center gap-2 rounded-full border border-emerald-500/40 bg-emerald-950/40 px-3 py-1 text-[11px] text-emerald-300 font-semibold">
+                <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" />
+                <span>{isUr ? '100% تصدیق شدہ فزیکل فارم نوٹیفکیشن مستقل فعال ہے' : '100% Verified Physical Farm notification is pinned above'}</span>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={handleResetBanners}
+                disabled={isSavingBanners}
+                className="flex items-center gap-1.5 rounded-xl border border-stone-600 bg-stone-900/60 px-3.5 py-2 text-xs font-bold text-stone-300 hover:bg-stone-800 hover:text-white transition-all cursor-pointer disabled:opacity-50"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                <span>{isUr ? 'ڈیفالٹ پر بحال کریں' : 'Reset Defaults'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleSaveAllBanners}
+                disabled={isSavingBanners}
+                className="flex items-center gap-2 rounded-xl border border-[#d4af37] bg-gradient-to-r from-[#d4af37] to-[#b38f2a] px-4 py-2 text-xs font-black text-[#051a10] shadow-lg shadow-[#d4af37]/20 hover:brightness-110 active:scale-95 transition-all cursor-pointer disabled:opacity-50"
+              >
+                {isSavingBanners ? (
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Check className="h-4 w-4" />
+                )}
+                <span>{isUr ? 'تمام بینرز محفوظ کریں' : 'Save All Banners'}</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Feedback Message */}
+          {bannerFeedbackMsg && (
+            <div className="rounded-2xl border border-emerald-500/50 bg-emerald-950/50 p-4 text-xs font-bold text-emerald-200 flex items-center gap-2 shadow-lg animate-in fade-in">
+              <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
+              <span>{bannerFeedbackMsg}</span>
+            </div>
+          )}
+
+          {/* 4 Banner Slots Grid */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+            {bannersList.map((banner, index) => (
+              <div
+                key={banner.id}
+                className={`flex flex-col justify-between rounded-3xl border p-4 sm:p-5 transition-all shadow-xl ${
+                  banner.active
+                    ? 'border-[#d4af37]/40 bg-[#0a2618]/90'
+                    : 'border-white/10 bg-[#071910]/60 opacity-70'
+                }`}
+              >
+                <div className="space-y-4">
+                  {/* Slot Header */}
+                  <div className="flex items-center justify-between border-b border-[#d4af37]/20 pb-3">
+                    <div className="flex items-center gap-2">
+                      <span className="flex h-7 w-7 items-center justify-center rounded-xl bg-[#d4af37] text-[#051a10] font-black text-xs">
+                        #{banner.order || index + 1}
+                      </span>
+                      <h4 className="text-sm font-extrabold text-[#f3df88]">
+                        {isUr ? `بینر سلاٹ #${banner.order || index + 1}` : `Banner Slide #${banner.order || index + 1}`}
+                      </h4>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <label className="text-[11px] text-[#f4efe6]/70 cursor-pointer flex items-center gap-1.5">
+                        <span>{banner.active ? (isUr ? 'فعال' : 'Active') : (isUr ? 'غیر فعال' : 'Inactive')}</span>
+                        <input
+                          type="checkbox"
+                          checked={banner.active}
+                          onChange={(e) => handleUpdateBannerField(banner.id, 'active', e.target.checked)}
+                          className="h-4 w-4 rounded accent-[#d4af37] cursor-pointer"
+                        />
+                      </label>
+                    </div>
+                  </div>
+
+                  {/* 16:9 Banner Image Preview */}
+                  <div className="relative aspect-video w-full overflow-hidden rounded-2xl border-2 border-[#d4af37]/30 bg-black/60 shadow-inner group">
+                    <img
+                      src={banner.imageUrl}
+                      alt={banner.title}
+                      className="h-full w-full object-cover group-hover:scale-105 transition-transform duration-500"
+                    />
+                    <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/30 to-transparent flex flex-col justify-end p-3">
+                      <span className="text-xs font-bold text-[#f3df88] drop-shadow line-clamp-1">
+                        {banner.title}
+                      </span>
+                      <span className="text-[10px] text-white/80 line-clamp-1">
+                        {banner.subtitle}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Upload Image / Custom URL Controls */}
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-[11px] font-bold text-[#d4af37] mb-1">
+                        {isUr ? 'نئی تصویر اپ لوڈ کریں (Upload File)' : 'Upload New Image File'}
+                      </label>
+                      <label className="flex items-center justify-center gap-2 rounded-xl border border-dashed border-[#d4af37]/50 bg-[#051a10]/60 p-3 hover:border-[#d4af37] hover:bg-[#051a10] transition-colors cursor-pointer text-xs text-[#f3df88] font-bold">
+                        <Upload className="h-4 w-4 text-[#d4af37]" />
+                        <span>{isUr ? 'کمپیوٹر / موبائل سے تصویر منتخب کریں' : 'Choose Image from Device'}</span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          className="hidden"
+                          onChange={(e) => {
+                            const file = e.target.files?.[0];
+                            if (file) handleBannerFileUpload(banner.id, file);
+                          }}
+                        />
+                      </label>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-[#d4af37] mb-1">
+                        {isUr ? 'یا تصویر کا URL درج کریں' : 'Or Image URL'}
+                      </label>
+                      <input
+                        type="text"
+                        value={banner.imageUrl}
+                        onChange={(e) => handleUpdateBannerField(banner.id, 'imageUrl', e.target.value)}
+                        placeholder="https://... or /banners/banner-1.jpg"
+                        className="w-full rounded-xl border border-[#d4af37]/30 bg-[#051a10] px-3 py-2 text-xs text-[#f4efe6] focus:border-[#d4af37] focus:outline-none"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-[11px] font-bold text-[#f4efe6]/80 mb-1">
+                          {isUr ? 'سلائیڈ کا عنوان' : 'Slide Title'}
+                        </label>
+                        <input
+                          type="text"
+                          value={banner.title}
+                          onChange={(e) => handleUpdateBannerField(banner.id, 'title', e.target.value)}
+                          placeholder="Slide Title"
+                          className="w-full rounded-xl border border-[#d4af37]/30 bg-[#051a10] px-3 py-2 text-xs text-[#f4efe6] focus:border-[#d4af37] focus:outline-none"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-[#f4efe6]/80 mb-1">
+                          {isUr ? 'ذیلی عنوان' : 'Subtitle'}
+                        </label>
+                        <input
+                          type="text"
+                          value={banner.subtitle}
+                          onChange={(e) => handleUpdateBannerField(banner.id, 'subtitle', e.target.value)}
+                          placeholder="Subtitle / details"
+                          className="w-full rounded-xl border border-[#d4af37]/30 bg-[#051a10] px-3 py-2 text-xs text-[#f4efe6] focus:border-[#d4af37] focus:outline-none"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Slot Footer Action */}
+                <div className="mt-4 pt-3 border-t border-[#d4af37]/20 flex items-center justify-between">
+                  <span className="text-[10px] text-[#f4efe6]/50">
+                    {isUr ? 'فوری لائیو سنک' : 'Instant Cloud Sync'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleSaveBanner(banner)}
+                    disabled={isSavingBanners}
+                    className="flex items-center gap-1.5 rounded-xl border border-[#d4af37]/50 bg-[#051a10] px-3 py-1.5 text-xs font-bold text-[#f3df88] hover:bg-[#d4af37] hover:text-[#051a10] transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    <Check className="h-3 w-3" />
+                    <span>{isUr ? 'اس سلاٹ کو محفوظ کریں' : `Save Slot #${banner.order || index + 1}`}</span>
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* TAB: FARM GALLERY MANAGEMENT (Requirement 2: Farm Photos & Videos Management) */}
+      {activeTab === 'gallery' && (
+        <div className="space-y-6">
+          {/* Header & Status Card */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-gradient-to-r from-[#0a2618] via-[#051a10] to-[#0a2618] p-5 rounded-3xl border border-[#d4af37]/40 shadow-xl">
+            <div>
+              <div className="flex items-center gap-2">
+                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-[#d4af37] to-[#aa8010] text-[#051a10] shadow-md shadow-[#d4af37]/30">
+                  <Images className="h-5 w-5" />
+                </div>
+                <h3 className="text-lg font-black text-[#f4efe6]">
+                  {isUr ? 'فارم میڈیا گیلری اور ویڈیو مینجمنٹ' : 'Farm Media & Video Gallery Management'}
+                </h3>
+              </div>
+              <p className="text-xs text-[#f4efe6]/70 mt-1 max-w-xl">
+                {isUr
+                  ? 'فیس بک اسٹائل فارم پروفائل میں دکھائی جانے والی تمام تصاویر اور ویڈیوز (کم از کم ۵ ثبوتی ویڈیوز اور لامحدود تصاویر) کا انتظام کریں۔'
+                  : 'Manage real farm photos and proof videos displayed in the Facebook-style profile for all investors (supports 5+ videos and unlimited photos).'}
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="rounded-xl border border-[#d4af37]/30 bg-[#051a10] px-3 py-1.5 text-xs font-bold text-[#f3df88]">
+                {galleryList.filter((g) => g.type === 'video').length} {isUr ? 'ویڈیوز' : 'Videos'} • {galleryList.filter((g) => g.type === 'photo').length} {isUr ? 'تصاویر' : 'Photos'}
+              </span>
+              <button
+                type="button"
+                onClick={handleResetGalleryToDefaults}
+                disabled={isSavingGallery}
+                className="flex items-center gap-1.5 rounded-xl border border-[#d4af37]/40 bg-[#051a10] px-3 py-1.5 text-xs font-bold text-[#d4af37] hover:bg-[#d4af37]/10 transition-colors cursor-pointer"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                <span>{isUr ? 'اصل ۵ ویڈیوز پر بحال کریں' : 'Reset Factory Media'}</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Feedback Message */}
+          {galleryFeedbackMsg && (
+            <div className="flex items-center gap-2 rounded-2xl border border-[#d4af37]/50 bg-gradient-to-r from-[#0a2618] to-[#051a10] p-4 text-xs sm:text-sm font-semibold text-[#f3df88] shadow-lg animate-in fade-in">
+              <CheckCircle2 className="h-5 w-5 text-[#d4af37] shrink-0" />
+              <span>{galleryFeedbackMsg}</span>
+            </div>
+          )}
+
+          {/* ADD NEW MEDIA FORM */}
+          <div className="rounded-3xl border border-[#d4af37]/30 bg-[#0a2618]/90 p-5 shadow-xl">
+            <div className="flex items-center justify-between pb-4 border-b border-[#d4af37]/20 mb-4">
+              <div className="flex items-center gap-2">
+                <Plus className="h-4 w-4 text-[#d4af37]" />
+                <h4 className="text-sm font-black text-[#f4efe6] uppercase tracking-wider">
+                  {isUr ? 'نیا میڈیا فارم میں شامل کریں' : 'Upload or Add Farm Media'}
+                </h4>
+              </div>
+              {/* Type Switcher */}
+              <div className="flex rounded-xl bg-[#051a10] p-1 border border-[#d4af37]/30">
+                <button
+                  type="button"
+                  onClick={() => setNewGalleryType('photo')}
+                  className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    newGalleryType === 'photo'
+                      ? 'bg-[#d4af37] text-[#051a10] shadow'
+                      : 'text-[#f4efe6]/70 hover:text-[#f4efe6]'
+                  }`}
+                >
+                  <ImageIcon className="h-3.5 w-3.5" />
+                  <span>{isUr ? 'تصویر (Photo)' : 'Photo'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setNewGalleryType('video')}
+                  className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    newGalleryType === 'video'
+                      ? 'bg-[#d4af37] text-[#051a10] shadow'
+                      : 'text-[#f4efe6]/70 hover:text-[#f4efe6]'
+                  }`}
+                >
+                  <Film className="h-3.5 w-3.5" />
+                  <span>{isUr ? 'ویڈیو (Video)' : 'Video'}</span>
+                </button>
+              </div>
+            </div>
+
+            <form onSubmit={handleAddGalleryMedia} className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Title */}
+                <div>
+                  <label className="block text-xs font-bold text-[#d4af37] mb-1">
+                    {isUr ? 'میڈیا کا عنوان (لازمی)' : 'Media Title (Required)'} *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={newGalleryTitle}
+                    onChange={(e) => setNewGalleryTitle(e.target.value)}
+                    placeholder={newGalleryType === 'video' ? 'e.g. Modern Automated Feeding Lines in Action' : 'e.g. Free-Range Morning Pasture'}
+                    className="w-full rounded-xl border border-[#d4af37]/30 bg-[#051a10] px-3.5 py-2.5 text-xs text-[#f4efe6] focus:border-[#d4af37] focus:outline-none"
+                  />
+                </div>
+
+                {/* Title Urdu */}
+                <div>
+                  <label className="block text-xs font-bold text-[#f4efe6]/80 mb-1">
+                    {isUr ? 'اردو عنوان (اختیاری)' : 'Urdu Title (Optional)'}
+                  </label>
+                  <input
+                    type="text"
+                    value={newGalleryTitleUr}
+                    onChange={(e) => setNewGalleryTitleUr(e.target.value)}
+                    placeholder="مثال: شیڈ نمبر ۱۰۱ میں جدید خودکار فیڈنگ سسٹم"
+                    dir="rtl"
+                    className="w-full rounded-xl border border-[#d4af37]/30 bg-[#051a10] px-3.5 py-2.5 text-xs text-[#f4efe6] focus:border-[#d4af37] focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {/* Media File Upload or URL */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-bold text-[#d4af37] mb-1">
+                    {newGalleryType === 'photo'
+                      ? (isUr ? 'ڈیوائس سے تصویر منتخب کریں' : 'Upload Photo from Device')
+                      : (isUr ? 'ویڈیو فائل اپ لوڈ کریں' : 'Upload Video File')}
+                  </label>
+                  <label className="flex items-center justify-center gap-2 rounded-xl border border-dashed border-[#d4af37]/50 bg-[#051a10] p-3 text-xs font-semibold text-[#f3df88] hover:border-[#d4af37] transition-colors cursor-pointer">
+                    <Upload className="h-4 w-4" />
+                    <span>
+                      {isUploadingGalleryFile
+                        ? (isUr ? 'اپ لوڈ ہو رہا ہے...' : 'Processing file...')
+                        : (isUr ? 'فائل منتخب کریں (JPEG/PNG/MP4)' : 'Select Media File from Device')}
+                    </span>
+                    <input
+                      type="file"
+                      accept={newGalleryType === 'photo' ? 'image/*' : 'video/*'}
+                      className="hidden"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) handleGalleryFileUpload(file);
+                      }}
+                    />
+                  </label>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-[#d4af37] mb-1">
+                    {isUr ? 'یا براہ راست میڈیا URL درج کریں' : 'Or Direct Media URL'} *
+                  </label>
+                  <input
+                    type="text"
+                    value={newGalleryMediaUrl}
+                    onChange={(e) => {
+                      setNewGalleryMediaUrl(e.target.value);
+                      if (newGalleryType === 'photo' && !newGalleryThumbnailUrl) {
+                        setNewGalleryThumbnailUrl(e.target.value);
+                      }
+                    }}
+                    placeholder={
+                      newGalleryType === 'video'
+                        ? 'https://...mp4 or YouTube video link'
+                        : 'https://images.unsplash.com/... or /banners/...'
+                    }
+                    className="w-full rounded-xl border border-[#d4af37]/30 bg-[#051a10] px-3.5 py-2.5 text-xs text-[#f4efe6] focus:border-[#d4af37] focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {/* Video Specific: Thumbnail & Duration */}
+              {newGalleryType === 'video' && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-bold text-[#f4efe6]/80 mb-1">
+                      {isUr ? 'ویڈیو تھمب نیل تصویر کا URL (اختیاری)' : 'Video Poster / Thumbnail Image URL (Optional)'}
+                    </label>
+                    <input
+                      type="text"
+                      value={newGalleryThumbnailUrl}
+                      onChange={(e) => setNewGalleryThumbnailUrl(e.target.value)}
+                      placeholder="https://images.unsplash.com/... (optional cover)"
+                      className="w-full rounded-xl border border-[#d4af37]/30 bg-[#051a10] px-3.5 py-2.5 text-xs text-[#f4efe6] focus:border-[#d4af37] focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-[#f4efe6]/80 mb-1">
+                      {isUr ? 'ویڈیو کا دورانیہ (مثلاً 02:15)' : 'Video Duration (e.g. 02:15)'}
+                    </label>
+                    <input
+                      type="text"
+                      value={newGalleryDuration}
+                      onChange={(e) => setNewGalleryDuration(e.target.value)}
+                      placeholder="01:45"
+                      className="w-full rounded-xl border border-[#d4af37]/30 bg-[#051a10] px-3.5 py-2.5 text-xs text-[#f4efe6] focus:border-[#d4af37] focus:outline-none"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* Location & Captions */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-xs font-bold text-[#f4efe6]/80 mb-1">
+                    {isUr ? 'مقام / شیڈ' : 'Farm Location / Shed'}
+                  </label>
+                  <input
+                    type="text"
+                    value={newGalleryLocation}
+                    onChange={(e) => setNewGalleryLocation(e.target.value)}
+                    placeholder="Islamabad Physical Farm (Shed-101)"
+                    className="w-full rounded-xl border border-[#d4af37]/30 bg-[#051a10] px-3.5 py-2.5 text-xs text-[#f4efe6] focus:border-[#d4af37] focus:outline-none"
+                  />
+                </div>
+
+                <div className="md:col-span-2">
+                  <label className="block text-xs font-bold text-[#f4efe6]/80 mb-1">
+                    {isUr ? 'تفصیل / کیپشن' : 'Caption / Description'}
+                  </label>
+                  <input
+                    type="text"
+                    value={newGalleryCaption}
+                    onChange={(e) => setNewGalleryCaption(e.target.value)}
+                    placeholder="Brief description of the farm routine or facility shown..."
+                    className="w-full rounded-xl border border-[#d4af37]/30 bg-[#051a10] px-3.5 py-2.5 text-xs text-[#f4efe6] focus:border-[#d4af37] focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {/* Preview Thumbnail if available */}
+              {newGalleryMediaUrl && (
+                <div className="p-3 rounded-2xl bg-[#051a10] border border-[#d4af37]/20 flex items-center gap-3">
+                  <div className="relative h-16 w-24 rounded-lg overflow-hidden bg-black shrink-0 border border-[#d4af37]/30">
+                    {newGalleryType === 'photo' ? (
+                      <img src={newGalleryMediaUrl} alt="Preview" className="h-full w-full object-cover" />
+                    ) : (
+                      <div className="h-full w-full flex items-center justify-center bg-emerald-950 text-[#d4af37]">
+                        <Play className="h-6 w-6" />
+                      </div>
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1 text-xs">
+                    <p className="font-bold text-[#f4efe6] truncate">{newGalleryTitle || 'Untitled Media'}</p>
+                    <p className="text-[11px] text-[#f4efe6]/60 truncate">{newGalleryMediaUrl}</p>
+                    <span className="inline-block mt-1 px-2 py-0.5 rounded-full bg-[#d4af37]/20 text-[#d4af37] text-[10px] font-bold uppercase">
+                      Ready to Publish
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* Submit Button */}
+              <div className="flex justify-end pt-2">
+                <button
+                  type="submit"
+                  disabled={isSavingGallery || !newGalleryTitle.trim() || !newGalleryMediaUrl.trim()}
+                  className="flex items-center gap-2 rounded-2xl bg-gradient-to-r from-[#d4af37] to-[#aa8010] px-6 py-2.5 text-xs font-black text-[#051a10] hover:brightness-110 transition-all shadow-md shadow-[#d4af37]/30 cursor-pointer disabled:opacity-50"
+                >
+                  <Plus className="h-4 w-4" />
+                  <span>
+                    {isSavingGallery
+                      ? (isUr ? 'محفوظ ہو رہا ہے...' : 'Publishing...')
+                      : (isUr ? 'گیلری میں شامل کریں' : 'Add to Farm Gallery')}
+                  </span>
+                </button>
+              </div>
+            </form>
+          </div>
+
+          {/* MEDIA LIST & FILTER */}
+          <div className="space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <h4 className="text-sm font-black text-[#f4efe6]">
+                  {isUr ? 'موجودہ گیلری آئٹمز' : 'Active Farm Gallery Items'}
+                </h4>
+                <span className="rounded-full bg-[#0a2618] px-2 py-0.5 text-[11px] font-bold text-[#d4af37] border border-[#d4af37]/30">
+                  {galleryList.length} Items
+                </span>
+              </div>
+
+              {/* Filter Tabs */}
+              <div className="flex rounded-xl bg-[#051a10] p-1 border border-[#d4af37]/30 self-start sm:self-auto">
+                <button
+                  type="button"
+                  onClick={() => setGalleryFilterTab('all')}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    galleryFilterTab === 'all'
+                      ? 'bg-[#d4af37] text-[#051a10]'
+                      : 'text-[#f4efe6]/70 hover:text-[#f4efe6]'
+                  }`}
+                >
+                  {isUr ? 'تمام' : 'All'} ({galleryList.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setGalleryFilterTab('video')}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    galleryFilterTab === 'video'
+                      ? 'bg-[#d4af37] text-[#051a10]'
+                      : 'text-[#f4efe6]/70 hover:text-[#f4efe6]'
+                  }`}
+                >
+                  {isUr ? 'ویڈیوز' : 'Videos'} ({galleryList.filter((g) => g.type === 'video').length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setGalleryFilterTab('photo')}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    galleryFilterTab === 'photo'
+                      ? 'bg-[#d4af37] text-[#051a10]'
+                      : 'text-[#f4efe6]/70 hover:text-[#f4efe6]'
+                  }`}
+                >
+                  {isUr ? 'تصاویر' : 'Photos'} ({galleryList.filter((g) => g.type === 'photo').length})
+                </button>
+              </div>
+            </div>
+
+            {/* Grid of Current Media */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              {galleryList
+                .filter((item) => galleryFilterTab === 'all' || item.type === galleryFilterTab)
+                .map((item, idx) => (
+                  <div
+                    key={`${item.id}_${idx}`}
+                    className="relative flex flex-col justify-between rounded-2xl border border-[#d4af37]/30 bg-[#0a2618]/90 overflow-hidden shadow-lg hover:border-[#d4af37]/70 transition-all"
+                  >
+                    {/* Media Thumbnail */}
+                    <div className="relative aspect-video w-full bg-black overflow-hidden group">
+                      <img
+                        src={item.thumbnailUrl || item.mediaUrl}
+                        alt={item.title}
+                        className="h-full w-full object-cover group-hover:scale-105 transition-transform duration-300"
+                        onError={(e) => {
+                          // Fallback to high quality farm image if external url fails
+                          (e.target as HTMLImageElement).src =
+                            'https://images.unsplash.com/photo-1548550023-2bdb3c5beed7?auto=format&fit=crop&w=800&q=80';
+                        }}
+                      />
+                      <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
+
+                      {/* Type Badge */}
+                      <div className="absolute top-2.5 left-2.5 flex items-center gap-1.5 rounded-lg bg-black/70 backdrop-blur-md px-2 py-1 text-[11px] font-bold text-white border border-white/20">
+                        {item.type === 'video' ? (
+                          <>
+                            <Film className="h-3 w-3 text-[#d4af37]" />
+                            <span>Video</span>
+                          </>
+                        ) : (
+                          <>
+                            <ImageIcon className="h-3 w-3 text-emerald-400" />
+                            <span>Photo</span>
+                          </>
+                        )}
+                      </div>
+
+                      {/* Video Duration or Active Status */}
+                      <div className="absolute top-2.5 right-2.5 flex items-center gap-1">
+                        {item.duration && (
+                          <span className="rounded-lg bg-black/80 px-2 py-0.5 text-[10px] font-mono font-bold text-[#f3df88]">
+                            {item.duration}
+                          </span>
+                        )}
+                        <span
+                          className={`rounded-full px-2 py-0.5 text-[10px] font-black uppercase ${
+                            item.active !== false && item.isActive !== false
+                              ? 'bg-emerald-500/80 text-white'
+                              : 'bg-rose-500/80 text-white'
+                          }`}
+                        >
+                          {item.active !== false && item.isActive !== false ? 'Active' : 'Hidden'}
+                        </span>
+                      </div>
+
+                      {/* Play Icon Overlay for Videos */}
+                      {item.type === 'video' && (
+                        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                          <div className="h-10 w-10 rounded-full bg-[#d4af37]/90 text-[#051a10] flex items-center justify-center shadow-lg">
+                            <Play className="h-5 w-5 fill-current ml-0.5" />
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Location bar */}
+                      <div className="absolute bottom-2 left-2.5 right-2.5 text-[10px] text-[#f4efe6]/80 truncate">
+                        📍 {item.location || 'Pak Hen Farm'}
+                      </div>
+                    </div>
+
+                    {/* Content Details */}
+                    <div className="p-3.5 space-y-2 flex-1 flex flex-col justify-between">
+                      <div>
+                        <h5 className="text-xs font-black text-[#f4efe6] line-clamp-1">
+                          {isUr && item.titleUr ? item.titleUr : item.title}
+                        </h5>
+                        {item.caption && (
+                          <p className="text-[11px] text-[#f4efe6]/60 line-clamp-2 mt-0.5">
+                            {isUr && item.captionUr ? item.captionUr : item.caption}
+                          </p>
+                        )}
+                      </div>
+
+                      {/* Action Bar */}
+                      <div className="pt-2 border-t border-[#d4af37]/15 flex items-center justify-between text-xs">
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const currentActive = item.active !== false && item.isActive !== false;
+                              handleToggleGalleryMediaActive(item.id, !currentActive);
+                            }}
+                            className={`rounded-lg px-2 py-1 text-[10px] font-bold transition-colors cursor-pointer border ${
+                              item.active !== false && item.isActive !== false
+                                ? 'border-amber-500/50 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20'
+                                : 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20'
+                            }`}
+                          >
+                            {item.active !== false && item.isActive !== false ? (isUr ? 'چھپائیں' : 'Hide') : (isUr ? 'دکھائیں' : 'Show')}
+                          </button>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <a
+                            href={item.mediaUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="p-1 rounded-lg text-[#f4efe6]/60 hover:text-[#d4af37] transition-colors"
+                            title="Open Link"
+                          >
+                            <ArrowUpRight className="h-4 w-4" />
+                          </a>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteGalleryMedia(item.id)}
+                            disabled={isSavingGallery}
+                            className="p-1 rounded-lg text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 transition-colors cursor-pointer"
+                            title="Delete Media"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+            </div>
           </div>
         </div>
       )}

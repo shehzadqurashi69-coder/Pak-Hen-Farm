@@ -44,13 +44,69 @@ export const WithdrawView: React.FC<WithdrawViewProps> = ({
   // Live Authoritative Wallet Balance Synced directly with Firestore
   const [liveBalance, setLiveBalance] = useState<number>(Number(user.walletBalance) || 0);
   const [amountStr, setAmountStr] = useState('');
-  const [selectedGateway, setSelectedGateway] = useState<string>('easypaisa');
-  const [easypaisaNumber, setEasypaisaNumber] = useState(user.easypaisaNumber || '');
-  const [easypaisaTitle, setEasypaisaTitle] = useState(user.easypaisaTitle || '');
+  const [selectedGateway, setSelectedGateway] = useState<string>(
+    user.paymentGateway || 'easypaisa'
+  );
+  const [accountNumber, setAccountNumber] = useState(
+    user.paymentAccountNumber || user.easypaisaNumber || ''
+  );
+  const [accountTitle, setAccountTitle] = useState(
+    user.paymentAccountTitle || user.easypaisaTitle || ''
+  );
+  const [bankName, setBankName] = useState(user.paymentBankName || '');
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   const [userWithdrawals, setUserWithdrawals] = useState<WithdrawalRequest[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Dynamic labels and placeholders for payout gateways
+  const getGatewayConfig = (gw: string) => {
+    switch (gw) {
+      case 'jazzcash':
+        return {
+          name: 'JazzCash',
+          titleLabel: isUr ? 'جاز کیش اکاؤنٹ ٹائٹل (وصول کنندہ کا نام) *' : 'JazzCash Account Title (Receiver Name) *',
+          titlePlaceholder: isUr ? 'مثلاً محمد علی' : 'e.g. Muhammad Ali',
+          numberLabel: isUr ? 'جاز کیش موبائل اکاؤنٹ نمبر *' : 'JazzCash Mobile Account Number *',
+          numberPlaceholder: '03XXXXXXXXX',
+        };
+      case 'sadapay':
+        return {
+          name: 'SadaPay',
+          titleLabel: isUr ? 'سادہ پے اکاؤنٹ ٹائٹل *' : 'SadaPay Account Title *',
+          titlePlaceholder: isUr ? 'مثلاً محمد علی' : 'e.g. Muhammad Ali',
+          numberLabel: isUr ? 'سادہ پے موبائل / آئی بین نمبر *' : 'SadaPay Mobile / IBAN Number *',
+          numberPlaceholder: '03XXXXXXXXX or PK00SADA...',
+        };
+      case 'upaisa':
+        return {
+          name: 'UPaisa',
+          titleLabel: isUr ? 'یوپیسہ اکاؤنٹ ٹائٹل *' : 'UPaisa Account Title *',
+          titlePlaceholder: isUr ? 'مثلاً محمد علی' : 'e.g. Muhammad Ali',
+          numberLabel: isUr ? 'یوپیسہ موبائل اکاؤنٹ نمبر *' : 'UPaisa Mobile Account Number *',
+          numberPlaceholder: '03XXXXXXXXX',
+        };
+      case 'bank':
+        return {
+          name: isUr ? 'بینک / راست' : 'Bank / Raast',
+          titleLabel: isUr ? 'بینک اکاؤنٹ ٹائٹل (اکاؤنٹ ہولڈر کا نام) *' : 'Bank Account Title (Account Holder Name) *',
+          titlePlaceholder: isUr ? 'مثلاً محمد علی' : 'e.g. Muhammad Ali',
+          numberLabel: isUr ? 'بینک اکاؤنٹ نمبر / 24 ہندسوں کا IBAN / راست آئی ڈی *' : 'Bank Account Number / 24-Digit IBAN / Raast ID *',
+          numberPlaceholder: 'PK00MEZN00... or Raast ID',
+        };
+      case 'easypaisa':
+      default:
+        return {
+          name: 'Easypaisa',
+          titleLabel: isUr ? 'ایزی پیسہ اکاؤنٹ ٹائٹل (وصول کنندہ کا نام) *' : 'Easypaisa Account Title (Receiver Name) *',
+          titlePlaceholder: isUr ? 'مثلاً محمد علی' : 'e.g. Muhammad Ali',
+          numberLabel: isUr ? 'ایزی پیسہ موبائل اکاؤنٹ نمبر *' : 'Easypaisa Mobile Account Number *',
+          numberPlaceholder: '03XXXXXXXXX',
+        };
+    }
+  };
+
+  const currentGwConfig = getGatewayConfig(selectedGateway);
 
   const parsedAmount = parseFloat(amountStr) || 0;
   const eggsEquiv = Math.floor(parsedAmount / EGG_PRICE_PKR);
@@ -112,8 +168,8 @@ export const WithdrawView: React.FC<WithdrawViewProps> = ({
         return;
       }
 
-      const cleanNum = easypaisaNumber.trim();
-      const cleanTitle = easypaisaTitle.trim();
+      const cleanNum = accountNumber.trim();
+      const cleanTitle = accountTitle.trim();
 
       if (!cleanNum || !cleanTitle) {
         setErrorMsg(
@@ -128,7 +184,7 @@ export const WithdrawView: React.FC<WithdrawViewProps> = ({
       const res = await apiCreateWithdrawal(freshUser || user, {
         amount: parsedAmount,
         easypaisaNumber: cleanNum,
-        easypaisaTitle: cleanTitle,
+        easypaisaTitle: `${cleanTitle} (${currentGwConfig.name}${bankName ? ` - ${bankName.trim()}` : ''})`,
       });
 
       setLiveBalance(res.updatedUser.walletBalance);
@@ -321,38 +377,50 @@ export const WithdrawView: React.FC<WithdrawViewProps> = ({
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
             <div>
               <label className="block text-xs font-semibold text-[#f3df88] mb-1">
-                {strings.easypaisaTitleLabel} *
+                {currentGwConfig.titleLabel}
               </label>
               <input
                 type="text"
                 required
                 disabled={isUserLocked(user)}
-                value={easypaisaTitle}
-                onChange={(e) => setEasypaisaTitle(e.target.value)}
-                placeholder="Receiver Name"
-                className="w-full rounded-xl border border-[#d4af37]/30 bg-[#051a10] py-2.5 px-3 text-xs text-[#f4efe6] placeholder-[#f4efe6]/30 focus:border-[#d4af37] focus:outline-none disabled:opacity-50"
+                value={accountTitle}
+                onChange={(e) => setAccountTitle(e.target.value)}
+                placeholder={currentGwConfig.titlePlaceholder}
+                className="w-full rounded-xl border border-[#d4af37]/35 bg-[#051a10] py-2.5 px-3 text-xs text-[#f4efe6] placeholder-[#f4efe6]/30 focus:border-[#d4af37] focus:outline-none focus:ring-1 focus:ring-[#d4af37] disabled:opacity-50"
               />
             </div>
 
             <div>
               <label className="block text-xs font-semibold text-[#f3df88] mb-1">
-                {selectedGateway === 'bank'
-                  ? isUr
-                    ? 'بینک اکاؤنٹ یا IBAN نمبر *'
-                    : 'Bank Account Number / IBAN *'
-                  : strings.easypaisaNumberLabel + ' *'}
+                {currentGwConfig.numberLabel}
               </label>
               <input
                 type="text"
                 required
                 disabled={isUserLocked(user)}
-                value={easypaisaNumber}
-                onChange={(e) => setEasypaisaNumber(e.target.value)}
-                placeholder={selectedGateway === 'bank' ? 'PK00MEZN00...' : '03XXXXXXXXX'}
-                className="w-full rounded-xl border border-[#d4af37]/30 bg-[#051a10] py-2.5 px-3 font-mono text-xs text-[#f4efe6] placeholder-[#f4efe6]/30 focus:border-[#d4af37] focus:outline-none disabled:opacity-50"
+                value={accountNumber}
+                onChange={(e) => setAccountNumber(e.target.value)}
+                placeholder={currentGwConfig.numberPlaceholder}
+                className="w-full rounded-xl border border-[#d4af37]/35 bg-[#051a10] py-2.5 px-3 font-mono text-xs text-[#f4efe6] placeholder-[#f4efe6]/30 focus:border-[#d4af37] focus:outline-none focus:ring-1 focus:ring-[#d4af37] disabled:opacity-50"
               />
             </div>
           </div>
+
+          {selectedGateway === 'bank' && (
+            <div>
+              <label className="block text-xs font-semibold text-[#f3df88] mb-1">
+                {isUr ? 'بینک کا نام (اختیاری)' : 'Bank Name (e.g. Meezan Bank, HBL, Allied Bank)'}
+              </label>
+              <input
+                type="text"
+                disabled={isUserLocked(user)}
+                value={bankName}
+                onChange={(e) => setBankName(e.target.value)}
+                placeholder="e.g. Meezan Bank Ltd"
+                className="w-full rounded-xl border border-[#d4af37]/35 bg-[#051a10] py-2.5 px-3 text-xs text-[#f4efe6] placeholder-[#f4efe6]/30 focus:border-[#d4af37] focus:outline-none focus:ring-1 focus:ring-[#d4af37] disabled:opacity-50"
+              />
+            </div>
+          )}
 
           <button
             type="submit"

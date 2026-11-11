@@ -58,6 +58,10 @@ export interface UserAccount {
   phone: string;
   easypaisaTitle: string;
   easypaisaNumber: string;
+  paymentGateway?: string; // 'easypaisa' | 'jazzcash' | 'sadapay' | 'upaisa' | 'bank'
+  paymentAccountTitle?: string;
+  paymentAccountNumber?: string;
+  paymentBankName?: string;
   role: UserRole;
   status?: UserStatus; // 'active' | 'suspended' | 'banned'
   statusReason?: string;
@@ -69,6 +73,38 @@ export interface UserAccount {
   createdAt: string;
   lastEggCollectionAt?: string; // ISO string
   packages: PurchasedPackage[];
+}
+
+export interface FarmBanner {
+  id: string; // 'banner-1', 'banner-2', 'banner-3', 'banner-4'
+  title: string;
+  subtitle?: string;
+  imageUrl: string;
+  linkUrl?: string;
+  active: boolean;
+  order: number;
+}
+
+export type FarmGalleryMediaType = 'photo' | 'video';
+
+export interface FarmGalleryItem {
+  id: string;
+  type: FarmGalleryMediaType;
+  title: string;
+  titleUr?: string;
+  caption?: string;
+  captionUr?: string;
+  mediaUrl: string; // image or video URL (MP4, YouTube embed/link)
+  thumbnailUrl?: string; // poster for video
+  duration?: string; // e.g. "1:45"
+  location?: string; // e.g. "Shed-101, Sargodha, Punjab"
+  uploadedAt: string;
+  createdAt?: string;
+  likesCount?: number;
+  viewsCount?: number;
+  order?: number;
+  active: boolean;
+  isActive?: boolean;
 }
 
 export type OrderStatus = 'pending' | 'approved' | 'rejected';

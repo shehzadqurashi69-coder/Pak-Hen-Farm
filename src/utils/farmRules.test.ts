@@ -630,14 +630,16 @@ test('90-Day Package Expiry: syncUserPackagesExpiry deactivates expired packages
 
   const user: UserAccount = {
     id: 'user-sync-1',
+    email: 'investor@test.com',
+    password: 'password123',
+    role: 'user',
     fullName: 'Test Investor',
     phone: '03001234567',
+    easypaisaTitle: 'Investor Title',
+    easypaisaNumber: '03001234567',
     walletBalance: 7004, // Must be strictly preserved!
-    totalWithdrawn: 1500,
     activeHens: 7, // 5 (old) + 2 (recent)
     referralCode: 'TEST90',
-    referralCount: 2,
-    referralEarnings: 200,
     createdAt: purchaseDate.toISOString(),
     packages: [
       {
@@ -683,7 +685,6 @@ test('90-Day Package Expiry: syncUserPackagesExpiry deactivates expired packages
 
   // 4. PRESERVATION: Wallet balance is 100% untouched and safe (Rs. 7004)
   assert.equal(syncResult.updatedUser.walletBalance, 7004);
-  assert.equal(syncResult.updatedUser.totalWithdrawn, 1500);
 
   // 5. Daily Income stops for expired package:
   // Before expiry: 7 hens * 30 = Rs. 210

@@ -58,6 +58,15 @@ import {
   cloudDeletePaymentMethod,
   cloudGetUserById,
   cloudUpdateUserProfile,
+  subscribeToBanners,
+  cloudSaveBanners,
+  cloudUpdateBanner,
+  subscribeToGallery,
+  cloudSaveGallery,
+  cloudAddGalleryItem,
+  cloudDeleteGalleryItem,
+  cloudToggleGalleryItemActive,
+  cloudLikeGalleryItem,
   INITIAL_PAYMENT_METHODS,
   db,
 } from './firebase';
@@ -75,6 +84,8 @@ export {
   subscribeToMedicalPayments,
   subscribeToPaymentMethods,
   subscribeToPaymentSettings,
+  subscribeToBanners,
+  subscribeToGallery,
   cloudApplyShedMortality,
   cloudUpdateShedCracking,
   cloudDeclareShedSickness,
@@ -82,6 +93,13 @@ export {
   cloudSubmitMedicalPaymentTid,
   cloudApproveMedicalPayment,
   cloudRejectMedicalPayment,
+  cloudSaveBanners,
+  cloudUpdateBanner,
+  cloudSaveGallery,
+  cloudAddGalleryItem,
+  cloudDeleteGalleryItem,
+  cloudToggleGalleryItemActive,
+  cloudLikeGalleryItem,
   INITIAL_PAYMENT_METHODS,
 };
 
@@ -96,8 +114,8 @@ export async function apiRegister(details: {
   email: string;
   password: string;
   phone: string;
-  easypaisaTitle: string;
-  easypaisaNumber: string;
+  easypaisaTitle?: string;
+  easypaisaNumber?: string;
   referralCode?: string;
 }): Promise<UserAccount> {
   return await cloudRegister(details);

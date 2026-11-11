@@ -1,5 +1,5 @@
 import React from 'react';
-import { LogOut, ArrowLeft, Languages, Bell } from 'lucide-react';
+import { LogOut, ArrowLeft, Languages, Bell, Images } from 'lucide-react';
 import { UserAccount } from '../types/farm';
 import { t } from '../utils/translations';
 
@@ -80,8 +80,22 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
         </div>
 
-        {/* Right: Notifications, Language toggle and user actions */}
+        {/* Right: Notifications, Farm Gallery, Language toggle and user actions */}
         <div className="flex items-center gap-2">
+          {/* Farm Gallery Button (Right at top header next to Farm Inbox) */}
+          <button
+            onClick={() => onNavigate('gallery')}
+            className={`relative flex items-center gap-1.5 rounded-xl border px-2.5 py-1.5 text-xs sm:text-sm font-bold transition-colors cursor-pointer active:scale-95 shadow-sm ${
+              activeScreen === 'gallery'
+                ? 'border-[#d4af37] bg-[#143d28] text-[#f3df88]'
+                : 'border-[#d4af37]/40 bg-[#0a2618] text-[#f3df88] hover:border-[#d4af37] hover:bg-[#0f3422]'
+            }`}
+            title={isUr ? 'فارم گیلری (تصاویر و ویڈیوز)' : 'Farm Gallery'}
+          >
+            <Images className="h-4 w-4 text-[#d4af37]" />
+            <span className="hidden sm:inline">{isUr ? 'فارم گیلری' : 'Farm Gallery'}</span>
+          </button>
+
           {/* Notifications Inbox Button (User only) */}
           {user && user.role === 'user' && (
             <button

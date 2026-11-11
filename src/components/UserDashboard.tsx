@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { UserAccount, EggCollectionRecord, GlobalFarmStats, UserAlert, FarmShed } from '../types/farm';
+import { UserAccount, EggCollectionRecord, GlobalFarmStats, UserAlert, FarmShed, FarmBanner } from '../types/farm';
 import {
   EGG_PRICE_PKR,
   isUserLocked,
@@ -9,10 +9,12 @@ import {
   calculateActiveHens,
   getPackageExpiryDetails,
   syncUserPackagesExpiry,
+  DEFAULT_BANNERS,
 } from '../utils/farmRules';
 import { subscribeToUserAlerts, apiPayMedicalFee, subscribeToSheds } from '../services/api';
 import { t } from '../utils/translations';
 import { TrustBadge } from './TrustBadge';
+import { BannerSlider } from './BannerSlider';
 import { CollectEggCard } from './CollectEggCard';
 import { YieldChart } from './YieldChart';
 import { MedicalPaymentModal } from './MedicalPaymentModal';
@@ -50,6 +52,7 @@ interface UserDashboardProps {
   onCollectedEggs: (record: EggCollectionRecord, updatedUser: UserAccount) => void;
   lang: 'en' | 'ur';
   unreadAlertsCount?: number;
+  banners?: FarmBanner[];
 }
 
 export const UserDashboard: React.FC<UserDashboardProps> = ({
@@ -60,6 +63,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
   onCollectedEggs,
   lang,
   unreadAlertsCount = 0,
+  banners = DEFAULT_BANNERS,
 }) => {
   const strings = t[lang];
   const isUr = lang === 'ur';
@@ -125,6 +129,9 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
     <div className="space-y-6 pb-12">
       {/* Prominently displayed Trust Badge */}
       <TrustBadge lang={lang} />
+
+      {/* Admin Image Banner Slider (Ads System - Auto-Scrolling Carousel) */}
+      <BannerSlider banners={banners} lang={lang} />
 
       {/* SINGLE STICKY MEDICAL ALERT BANNER (Direct on Dashboard, Non-Dismissible, Deduplicated) */}
       {activeSicknessAlert && (
@@ -264,7 +271,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
       <div className="grid grid-cols-2 lg:grid-cols-3 gap-2.5 sm:gap-4">
         {/* 1. My Wallet (Showing current balance & quick status) */}
         <button
-          onClick={() => onNavigate('withdraw')}
+          onClick={() => onNavigate('wallet')}
           className="group relative overflow-hidden rounded-3xl p-3.5 sm:p-5 bg-gradient-to-r from-[#d4af37] via-[#f3df88] to-[#b38f20] text-[#051a10] border-2 border-[#fff2b2] shadow-xl shadow-[#d4af37]/35 hover:shadow-2xl hover:shadow-[#d4af37]/50 hover:brightness-105 active:scale-[0.98] transition-all cursor-pointer flex flex-col justify-between min-h-[135px] sm:min-h-[155px] text-left min-w-0"
         >
           <div className="w-full">
@@ -437,13 +444,16 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
         )}
 
         {/* 5. Daily Egg Yield (Current active egg production) */}
-        <div className="group relative overflow-hidden rounded-3xl p-3.5 sm:p-5 bg-gradient-to-r from-[#d4af37] via-[#f3df88] to-[#b38f20] text-[#051a10] border-2 border-[#fff2b2] shadow-xl shadow-[#d4af37]/35 flex flex-col justify-between min-h-[135px] sm:min-h-[155px] text-left min-w-0">
+        <button
+          onClick={() => onNavigate('profit')}
+          className="group relative overflow-hidden rounded-3xl p-3.5 sm:p-5 bg-gradient-to-r from-[#d4af37] via-[#f3df88] to-[#b38f20] text-[#051a10] border-2 border-[#fff2b2] shadow-xl shadow-[#d4af37]/35 hover:shadow-2xl hover:shadow-[#d4af37]/50 hover:brightness-105 active:scale-[0.98] transition-all cursor-pointer flex flex-col justify-between min-h-[135px] sm:min-h-[155px] text-left min-w-0"
+        >
           <div className="w-full">
             <div className="flex items-center justify-between mb-2">
               <span className="text-[10px] sm:text-xs font-black uppercase text-[#143d24] tracking-wider truncate">
                 {strings.dailyEggsYield}
               </span>
-              <div className="flex h-7 w-7 sm:h-9 sm:w-9 shrink-0 items-center justify-center rounded-xl bg-[#051a10] text-[#f3df88] shadow-md shadow-[#051a10]/40">
+              <div className="flex h-7 w-7 sm:h-9 sm:w-9 shrink-0 items-center justify-center rounded-xl bg-[#051a10] text-[#f3df88] shadow-md shadow-[#051a10]/40 group-hover:scale-110 transition-transform">
                 <Egg className="h-4 w-4 sm:h-4.5 sm:w-4.5" />
               </div>
             </div>
@@ -461,24 +471,21 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                 `${liveActiveHens} ${isUr ? 'فعال مرغیاں (1:1 تناسب)' : 'Active Hens (1:1 Yield)'}`
               )}
             </span>
-            <span className={`px-1.5 py-0.5 rounded-md font-mono text-[10px] shrink-0 font-black shadow-sm ${
-              liveActiveHens === 0 && expiredPackages.length > 0
-                ? 'bg-rose-950 text-rose-200'
-                : 'bg-[#051a10] text-[#f3df88]'
-            }`}>
-              {liveActiveHens === 0 && expiredPackages.length > 0 ? '0%' : '100%'}
-            </span>
+            <span className="text-[#051a10] font-black text-xs shrink-0 group-hover:translate-x-1 transition-transform">→</span>
           </div>
-        </div>
+        </button>
 
         {/* 6. Est. Daily Income (Estimated earnings calculation) */}
-        <div className="group relative overflow-hidden rounded-3xl p-3.5 sm:p-5 bg-gradient-to-r from-[#d4af37] via-[#f3df88] to-[#b38f20] text-[#051a10] border-2 border-[#fff2b2] shadow-xl shadow-[#d4af37]/35 flex flex-col justify-between min-h-[135px] sm:min-h-[155px] text-left min-w-0">
+        <button
+          onClick={() => onNavigate('profit')}
+          className="group relative overflow-hidden rounded-3xl p-3.5 sm:p-5 bg-gradient-to-r from-[#d4af37] via-[#f3df88] to-[#b38f20] text-[#051a10] border-2 border-[#fff2b2] shadow-xl shadow-[#d4af37]/35 hover:shadow-2xl hover:shadow-[#d4af37]/50 hover:brightness-105 active:scale-[0.98] transition-all cursor-pointer flex flex-col justify-between min-h-[135px] sm:min-h-[155px] text-left min-w-0"
+        >
           <div className="w-full">
             <div className="flex items-center justify-between mb-2">
               <span className="text-[10px] sm:text-xs font-black uppercase text-[#143d24] tracking-wider truncate">
                 {strings.approxDailyIncome}
               </span>
-              <div className="flex h-7 w-7 sm:h-9 sm:w-9 shrink-0 items-center justify-center rounded-xl bg-[#051a10] text-[#f3df88] shadow-md shadow-[#051a10]/40">
+              <div className="flex h-7 w-7 sm:h-9 sm:w-9 shrink-0 items-center justify-center rounded-xl bg-[#051a10] text-[#f3df88] shadow-md shadow-[#051a10]/40 group-hover:scale-110 transition-transform">
                 <TrendingUp className="h-4 w-4 sm:h-4.5 sm:w-4.5" />
               </div>
             </div>
@@ -496,169 +503,10 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                 isUr ? '1 انڈا = 30 روپے نقد' : 'Rate: 1 Egg = Rs. 30'
               )}
             </span>
-            <span className={`px-1.5 py-0.5 rounded-md font-mono text-[10px] shrink-0 font-black shadow-sm ${
-              liveActiveHens === 0 && expiredPackages.length > 0
-                ? 'bg-rose-950 text-rose-200'
-                : 'bg-[#051a10] text-[#f3df88]'
-            }`}>
-              {liveActiveHens === 0 && expiredPackages.length > 0 ? 'PAUSED' : 'PKR'}
-            </span>
+            <span className="text-[#051a10] font-black text-xs shrink-0 group-hover:translate-x-1 transition-transform">→</span>
           </div>
-        </div>
+        </button>
       </div>
-
-      {/* =========================================================================
-          MY FLOCK PACKAGES: 90-DAY STRICT VALIDITY & EXPIRY STATUS CARDS
-          Displays live duration, countdown, and prominent "Package Expired" badge
-          with direct option to renew or buy a new package.
-         ========================================================================= */}
-      {allUserPackages.length > 0 && (
-        <div className="rounded-3xl border border-[#d4af37]/35 bg-[#0a2618]/90 p-5 sm:p-6 shadow-xl backdrop-blur-md space-y-4">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#d4af37]/20 pb-3">
-            <div className="flex items-center gap-2.5">
-              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-[#d4af37]/20 border border-[#d4af37]/40 text-[#f3df88]">
-                <Feather className="h-5 w-5" />
-              </div>
-              <div>
-                <h3 className="text-base font-extrabold text-[#f4efe6]">
-                  {isUr ? 'میرے فلاک پیکجز (90 روزہ مقررہ مدت)' : 'My Flock Packages (90-Day Strict Validity)'}
-                </h3>
-                <p className="text-xs text-[#f4efe6]/60">
-                  {isUr
-                    ? 'خریداری کی تاریخ سے مکمل 90 دن تک منافع حاصل ہوتا ہے، جس کے بعد پیکج ازخود منقضی ہو جاتا ہے۔'
-                    : 'Each package produces daily egg yield for strictly 90 days from purchase date.'}
-                </p>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2 text-xs font-bold">
-              {activePackages.length > 0 && (
-                <span className="rounded-full bg-emerald-950/80 border border-emerald-500/50 px-3 py-1 text-emerald-300">
-                  {activePackages.length} {isUr ? 'فعال پیکج' : 'Active'}
-                </span>
-              )}
-              {expiredPackages.length > 0 && (
-                <span className="rounded-full bg-rose-950/80 border border-rose-500/60 px-3 py-1 text-rose-300">
-                  {expiredPackages.length} {isUr ? 'منقضی شدہ' : 'Expired'}
-                </span>
-              )}
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-            {allUserPackages.map((pkg) => {
-              const details = getPackageExpiryDetails(pkg, now);
-              return (
-                <div
-                  key={pkg.id}
-                  className={`relative overflow-hidden rounded-2xl p-4 border transition-all ${
-                    details.isExpired
-                      ? 'border-rose-500/50 bg-gradient-to-br from-rose-950/40 via-[#18070a] to-[#051a10] shadow-lg'
-                      : 'border-[#d4af37]/35 bg-gradient-to-br from-[#051a10] to-[#0a2618] shadow-md'
-                  }`}
-                >
-                  <div className="flex items-start justify-between gap-3 mb-2.5">
-                    <div>
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="text-sm font-black text-[#f3df88]">
-                          {pkg.hens} {isUr ? 'مرغیاں' : 'Hens'}
-                        </span>
-                        <span className="text-xs text-[#f4efe6]/70 font-mono">
-                          (Rs. {pkg.purchasePrice.toLocaleString()})
-                        </span>
-                        <span className="px-2 py-0.5 rounded-md border border-[#d4af37]/40 bg-[#d4af37]/15 text-[#f3df88] font-mono font-bold text-[10px]">
-                          {pkg.shedId || 'Shed-101'}
-                        </span>
-                      </div>
-                      <div className="text-[11px] text-[#f4efe6]/60 mt-0.5">
-                        {isUr ? 'خریداری تاریخ:' : 'Purchased:'}{' '}
-                        <span className="font-semibold text-[#f4efe6]">
-                          {details.purchaseDate.toLocaleDateString(isUr ? 'ur-PK' : 'en-US')}
-                        </span>
-                      </div>
-                    </div>
-
-                    {/* Expiry Badge */}
-                    {details.isExpired ? (
-                      <span className="shrink-0 inline-flex items-center gap-1 rounded-full bg-rose-950 border border-rose-500/80 px-2.5 py-1 text-[10px] font-black uppercase tracking-wider text-rose-300 shadow-sm animate-pulse">
-                        <AlertTriangle className="h-3 w-3" />
-                        {isUr ? 'پیکج منقضی شدہ' : 'Package Expired'}
-                      </span>
-                    ) : (
-                      <span className="shrink-0 inline-flex items-center gap-1 rounded-full bg-emerald-950 border border-emerald-500/60 px-2.5 py-1 text-[10px] font-black uppercase tracking-wider text-emerald-300">
-                        <CheckCircle2 className="h-3 w-3" />
-                        {isUr ? 'فعال (90 دن)' : 'Active (90 Days)'}
-                      </span>
-                    )}
-                  </div>
-
-                  {/* Expiry Details & Progress */}
-                  <div className="rounded-xl bg-[#03130c]/80 p-3 border border-white/5 space-y-2 text-xs">
-                    <div className="flex items-center justify-between text-[11px]">
-                      <span className="text-[#f4efe6]/60">
-                        {details.isExpired
-                          ? (isUr ? 'منقضی ہونے کی تاریخ:' : 'Expired on:')
-                          : (isUr ? 'اختتام کی تاریخ:' : 'Valid until:')}
-                      </span>
-                      <span className={`font-mono font-bold ${details.isExpired ? 'text-rose-400' : 'text-amber-300'}`}>
-                        {details.expiryDate.toLocaleDateString(isUr ? 'ur-PK' : 'en-US')}
-                      </span>
-                    </div>
-
-                    {/* Validity Bar */}
-                    <div className="space-y-1">
-                      <div className="flex items-center justify-between text-[10px] text-[#f4efe6]/60">
-                        <span>{isUr ? 'مدت کی پیش رفت' : '90-Day Validity Progress'}</span>
-                        <span className="font-mono font-bold">
-                          {details.isExpired
-                            ? (isUr ? '90/90 دن مکمل' : '90/90 Days (100%)')
-                            : (isUr ? `${details.daysElapsed}/90 دن (${details.daysRemaining} دن باقی)` : `${details.daysElapsed}/90 Days (${details.daysRemaining}d left)`)}
-                        </span>
-                      </div>
-                      <div className="h-2 w-full rounded-full bg-black/40 overflow-hidden border border-white/10">
-                        <div
-                          className={`h-full transition-all rounded-full ${
-                            details.isExpired
-                              ? 'bg-gradient-to-r from-rose-600 to-rose-500'
-                              : 'bg-gradient-to-r from-emerald-500 to-[#d4af37]'
-                          }`}
-                          style={{ width: `${details.percentElapsed}%` }}
-                        />
-                      </div>
-                    </div>
-
-                    {/* Expiry Notice & Renew Option */}
-                    {details.isExpired ? (
-                      <div className="pt-2 border-t border-rose-500/20 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                        <span className="text-[11px] text-rose-300 font-medium">
-                          {isUr
-                            ? '⚠️ 90 روزہ مدت ختم۔ اس پیکج کی یومیہ پیداوار رک گئی ہے۔'
-                            : '⚠️ 90-day validity completed. Daily egg yield for this package has stopped.'}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => onNavigate('packages')}
-                          className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-gradient-to-r from-[#d4af37] via-[#f3df88] to-[#b38f20] px-3.5 py-1.5 text-xs font-black text-[#051a10] hover:brightness-110 active:scale-95 transition-all shadow-md shrink-0 cursor-pointer"
-                        >
-                          <RefreshCw className="h-3 w-3" />
-                          <span>{isUr ? 'پیکج تجدید کریں' : 'Renew / Buy New Package'}</span>
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="pt-1 border-t border-white/5 flex items-center justify-between text-[11px] text-[#f4efe6]/70">
-                        <span>{isUr ? 'یومیہ پیداوار:' : 'Current Daily Yield:'}</span>
-                        <span className="text-emerald-400 font-bold font-mono">
-                          +{pkg.hens} {isUr ? 'انڈے' : 'Eggs'} (+Rs. {(pkg.hens * 30).toLocaleString()}/day)
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
 
       {/* Manual 24-Hour Egg Collection Section */}
       <CollectEggCard
@@ -718,74 +566,82 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
         </div>
       </div>
 
-      {/* Secondary Clean Utility Bar (Farm Inbox with Live Unread Badge, Invite, SOS Support) */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
-        {/* Dedicated Farm Inbox Card with Accurate Unread Badge */}
-        <button
-          onClick={() => onNavigate('notifications')}
-          className="relative flex items-center justify-between gap-3 rounded-2xl border border-[#d4af37]/30 bg-gradient-to-r from-[#0a2618] to-[#051a10] p-4 text-left hover:border-[#d4af37] hover:bg-[#0f3422] transition-all cursor-pointer active:scale-95 group shadow-lg min-w-0"
-        >
-          <div className="flex items-center gap-3 min-w-0">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#d4af37]/20 border border-[#d4af37]/35 text-[#f3df88] group-hover:scale-110 transition-transform">
-              <Inbox className="h-5 w-5" />
+      {/* Requirement 6: Persistent Floating Quick-Access Navigation Bar (Farm Inbox, Invite & Earn, Help / SOS) */}
+      <div className="sticky bottom-3 z-40 w-full max-w-2xl mx-auto pt-2 px-1">
+        <div className="grid grid-cols-3 gap-2 sm:gap-3 p-2 rounded-2xl border-2 border-[#d4af37]/60 bg-[#051a10]/95 backdrop-blur-xl shadow-2xl shadow-black/90">
+          {/* Dedicated Farm Inbox Card with Live Unread Badge */}
+          <button
+            onClick={() => onNavigate('notifications')}
+            className="relative flex items-center justify-center sm:justify-start gap-2 rounded-xl border border-[#d4af37]/40 bg-gradient-to-r from-[#0a2618] to-[#072013] p-2.5 sm:p-3 text-left hover:border-[#d4af37] hover:bg-[#0f3422] transition-all cursor-pointer active:scale-95 group shadow-md min-w-0"
+          >
+            <div className="relative flex h-8 w-8 sm:h-9 sm:w-9 shrink-0 items-center justify-center rounded-lg bg-[#d4af37]/20 border border-[#d4af37]/40 text-[#f3df88] group-hover:scale-105 transition-transform">
+              <Inbox className="h-4 w-4" />
+              {unreadAlertsCount > 0 && (
+                <span className="sm:hidden absolute -top-1.5 -right-1.5 flex h-4 min-w-[16px] px-1 shrink-0 items-center justify-center rounded-full bg-amber-500 text-[9px] font-black text-[#051a10] shadow animate-pulse">
+                  {unreadAlertsCount > 99 ? '99+' : unreadAlertsCount}
+                </span>
+              )}
             </div>
-            <div className="min-w-0">
-              <span className="text-sm font-bold text-[#f4efe6] block truncate">
+            <div className="min-w-0 hidden sm:block">
+              <span className="text-xs sm:text-sm font-bold text-[#f4efe6] block truncate">
                 {strings.navInbox}
               </span>
-              <span className="text-[11px] text-[#f4efe6]/60 block truncate">
-                {isUr ? 'سرکاری الرٹس اور لاگز' : 'Official Notices & Logs'}
+              <span className="text-[10px] text-[#f4efe6]/60 block truncate">
+                {isUr ? 'سرکاری الرٹس' : 'Notices & Logs'}
               </span>
             </div>
-          </div>
-          {unreadAlertsCount > 0 && (
-            <span className="flex h-5 min-w-[20px] px-1.5 shrink-0 items-center justify-center rounded-full bg-amber-500 text-[10px] font-black text-[#051a10] shadow-md animate-pulse">
-              {unreadAlertsCount > 99 ? '99+' : unreadAlertsCount}
+            {unreadAlertsCount > 0 && (
+              <span className="hidden sm:flex ml-auto h-5 min-w-[20px] px-1.5 shrink-0 items-center justify-center rounded-full bg-amber-500 text-[10px] font-black text-[#051a10] shadow-md animate-pulse">
+                {unreadAlertsCount > 99 ? '99+' : unreadAlertsCount}
+              </span>
+            )}
+            <span className="sm:hidden text-[11px] font-bold text-[#f4efe6] truncate">
+              {strings.navInbox}
             </span>
-          )}
-        </button>
+          </button>
 
-        {/* Invite & Earn */}
-        <button
-          onClick={() => onNavigate('invite')}
-          className="flex items-center justify-between gap-3 rounded-2xl border border-[#d4af37]/30 bg-gradient-to-r from-[#0a2618] to-[#051a10] p-4 text-left hover:border-[#d4af37] hover:bg-[#0f3422] transition-all cursor-pointer active:scale-95 group shadow-lg min-w-0"
-        >
-          <div className="flex items-center gap-3 min-w-0">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#d4af37]/20 border border-[#d4af37]/35 text-[#f3df88] group-hover:scale-110 transition-transform">
-              <Gift className="h-5 w-5" />
+          {/* Invite & Earn */}
+          <button
+            onClick={() => onNavigate('invite')}
+            className="flex items-center justify-center sm:justify-start gap-2 rounded-xl border border-[#d4af37]/40 bg-gradient-to-r from-[#0a2618] to-[#072013] p-2.5 sm:p-3 text-left hover:border-[#d4af37] hover:bg-[#0f3422] transition-all cursor-pointer active:scale-95 group shadow-md min-w-0"
+          >
+            <div className="flex h-8 w-8 sm:h-9 sm:w-9 shrink-0 items-center justify-center rounded-lg bg-[#d4af37]/20 border border-[#d4af37]/40 text-[#f3df88] group-hover:scale-105 transition-transform">
+              <Gift className="h-4 w-4" />
             </div>
-            <div className="min-w-0">
-              <span className="text-sm font-bold text-[#f4efe6] block truncate">
+            <div className="min-w-0 hidden sm:block">
+              <span className="text-xs sm:text-sm font-bold text-[#f4efe6] block truncate">
                 {strings.navInvite}
               </span>
-              <span className="text-[11px] text-[#f4efe6]/60 block truncate">
-                {isUr ? 'دوستوں کو مدعو کریں اور کمائیں' : 'Refer Partners & Earn'}
+              <span className="text-[10px] text-[#f4efe6]/60 block truncate">
+                {isUr ? 'کمائیں' : 'Refer & Earn'}
               </span>
             </div>
-          </div>
-          <ArrowRight className="h-4 w-4 text-[#d4af37] shrink-0 group-hover:translate-x-1 transition-transform" />
-        </button>
+            <span className="sm:hidden text-[11px] font-bold text-[#f4efe6] truncate">
+              {strings.navInvite}
+            </span>
+          </button>
 
-        {/* Emergency Help / SOS Helpline */}
-        <button
-          onClick={() => onNavigate('help')}
-          className="flex items-center justify-between gap-3 rounded-2xl border border-amber-500/40 bg-gradient-to-r from-[#0a2618] to-[#120800] p-4 text-left hover:border-amber-400 hover:bg-[#1a0e05] transition-all cursor-pointer active:scale-95 group shadow-lg min-w-0"
-        >
-          <div className="flex items-center gap-3 min-w-0">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-500/20 border border-amber-400/40 text-amber-300 group-hover:scale-110 transition-transform">
-              <HelpCircle className="h-5 w-5" />
+          {/* Emergency Help / SOS Helpline */}
+          <button
+            onClick={() => onNavigate('help')}
+            className="flex items-center justify-center sm:justify-start gap-2 rounded-xl border border-amber-500/50 bg-gradient-to-r from-[#140b02] to-[#0a2618] p-2.5 sm:p-3 text-left hover:border-amber-400 hover:bg-[#1a0e05] transition-all cursor-pointer active:scale-95 group shadow-md min-w-0"
+          >
+            <div className="flex h-8 w-8 sm:h-9 sm:w-9 shrink-0 items-center justify-center rounded-lg bg-amber-500/25 border border-amber-400/50 text-amber-300 group-hover:scale-105 transition-transform">
+              <HelpCircle className="h-4 w-4" />
             </div>
-            <div className="min-w-0">
-              <span className="text-sm font-bold text-[#f4efe6] block truncate">
+            <div className="min-w-0 hidden sm:block">
+              <span className="text-xs sm:text-sm font-bold text-[#f4efe6] block truncate">
                 {strings.navHelp}
               </span>
-              <span className="text-[11px] text-amber-300/70 block truncate">
-                {isUr ? 'ہنگامی مدد اور ہیلپ لائن' : 'Emergency Help & SOS'}
+              <span className="text-[10px] text-amber-300/70 block truncate">
+                {isUr ? 'ہیلپ لائن' : 'SOS Support'}
               </span>
             </div>
-          </div>
-          <ArrowRight className="h-4 w-4 text-amber-400 shrink-0 group-hover:translate-x-1 transition-transform" />
-        </button>
+            <span className="sm:hidden text-[11px] font-bold text-amber-300 truncate">
+              {strings.navHelp}
+            </span>
+          </button>
+        </div>
       </div>
 
       {/* Terms & Helpline quick bar */}

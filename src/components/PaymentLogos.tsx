@@ -59,39 +59,19 @@ export const PaymentLogo: React.FC<PaymentLogoProps> = ({
     );
   }
 
-  // 2. Easypaisa Official Brand (Authentic Emerald Green #00A859 & White Circular Spiral/Leaf Swoosh)
+  // 2. Easypaisa Official Brand (Official User-Uploaded Brand Logo /assets/aistudio/images__1__18ade27b.png)
   if (normalizedKey.includes('easy')) {
     const iconElement = (
-      <svg
-        viewBox="0 0 40 40"
-        className={`${sizeDimensions.icon} shrink-0 drop-shadow`}
-        fill="none"
-        xmlns="http://www.w3.org/2000/svg"
+      <div
+        className={`${sizeDimensions.icon} flex items-center justify-center rounded-lg bg-white p-0.5 shadow-md border border-white/80 shrink-0 overflow-hidden`}
       >
-        {/* Official Easypaisa Vibrant Emerald Green Base */}
-        <rect width="40" height="40" rx="9" fill="#00A859" />
-        <rect x="0.75" y="0.75" width="38.5" height="38.5" rx="8.25" stroke="#69F0AE" strokeWidth="1.2" strokeOpacity="0.5" />
-        
-        {/* Official Easypaisa Pure White Swirling Spiral / Leaf Swoosh */}
-        {/* Upper swoosh / leaf curve */}
-        <path
-          d="M20 8.5C14.2 8.5 9.5 13.2 9.5 19C9.5 22 10.8 24.7 12.9 26.6C13.5 27.1 14.4 27 14.8 26.4C15.2 25.8 15.1 24.9 14.5 24.4C12.8 22.9 11.9 20.8 11.9 19C11.9 14.5 15.5 10.9 20 10.9C23.9 10.9 27.2 13.6 28 17.3C28.2 18.1 29 18.5 29.8 18.3C30.6 18.1 31.1 17.3 30.9 16.5C29.8 11.8 25.3 8.5 20 8.5Z"
-          fill="#FFFFFF"
+        <img
+          src="/assets/aistudio/images__1__18ade27b.png"
+          alt="Easypaisa Official"
+          className="h-full w-full object-contain select-none"
+          loading="eager"
         />
-        {/* Lower complementary swoosh / leaf curve completing dynamic loop */}
-        <path
-          d="M20 29.5C25.8 29.5 30.5 24.8 30.5 19C30.5 16 29.2 13.3 27.1 11.4C26.5 10.9 25.6 11 25.2 11.6C24.8 12.2 24.9 13.1 25.5 13.6C27.2 15.1 28.1 17.2 28.1 19C28.1 23.5 24.5 27.1 20 27.1C16.1 27.1 12.8 24.4 12 20.7C11.8 19.9 11 19.5 10.2 19.7C9.4 19.9 8.9 20.7 9.1 21.5C10.2 26.2 14.7 29.5 20 29.5Z"
-          fill="#FFFFFF"
-        />
-        {/* Central Core Emblem */}
-        <circle cx="20" cy="19" r="3" fill="#FFFFFF" />
-        
-        {/* Authentic Easypaisa Bottom Banner */}
-        <rect x="6.5" y="31.5" width="27" height="5" rx="2" fill="#006837" />
-        <text x="20" y="35.3" fill="#FFFFFF" fontSize="3.8" fontWeight="900" textAnchor="middle" letterSpacing="0.4" fontFamily="system-ui, sans-serif">
-          EASYPAISA
-        </text>
-      </svg>
+      </div>
     );
 
     if (showLabel) {
@@ -102,13 +82,17 @@ export const PaymentLogo: React.FC<PaymentLogoProps> = ({
         >
           {iconElement}
           <span className="tracking-tight text-white font-extrabold">
-            easy<span className="text-[#69f0ae]">paisa</span>
+            easy<span className="text-[#00c853]">paisa</span>
           </span>
         </div>
       );
     }
 
-    return <div className={`inline-flex shrink-0 ${className}`} title="Easypaisa Official">{iconElement}</div>;
+    return (
+      <div className={`inline-flex shrink-0 ${className}`} title="Easypaisa Official">
+        {iconElement}
+      </div>
+    );
   }
 
   // 3. SadaPay Official Brand (Teal & Coral Modern Neobank)

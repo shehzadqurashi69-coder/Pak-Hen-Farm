@@ -40,12 +40,16 @@ import {
   PaymentAccount,
   PaymentMethodType,
   PaymentSettings,
+  FarmBanner,
+  FarmGalleryItem,
 } from '../types/farm';
 import {
   PACKAGE_VALIDITY_DAYS,
   EGG_PRICE_PKR,
   isAdminEmail,
   OFFICIAL_INFO,
+  DEFAULT_BANNERS,
+  DEFAULT_GALLERY_ITEMS,
   calculateReferralCommission,
   deductWithdrawalBalance,
   refundWithdrawalBalance,
@@ -172,8 +176,8 @@ export async function cloudRegister(details: {
   email: string;
   password: string;
   phone: string;
-  easypaisaTitle: string;
-  easypaisaNumber: string;
+  easypaisaTitle?: string;
+  easypaisaNumber?: string;
   referralCode?: string;
 }): Promise<UserAccount> {
   const cleanEmail = details.email.trim().toLowerCase();
@@ -209,14 +213,20 @@ export async function cloudRegister(details: {
   }
 
   const userId = 'USR-' + Date.now().toString(36).toUpperCase() + '-' + Math.floor(100 + Math.random() * 900);
+  const epTitle = (details.easypaisaTitle || details.fullName || '').trim();
+  const epNumber = (details.easypaisaNumber || details.phone || '').trim();
+
   const newUser: Record<string, any> = {
     id: userId,
     email: cleanEmail,
     password: details.password.trim(),
     fullName: details.fullName.trim(),
     phone: details.phone.trim(),
-    easypaisaTitle: details.easypaisaTitle.trim(),
-    easypaisaNumber: details.easypaisaNumber.trim(),
+    easypaisaTitle: epTitle,
+    easypaisaNumber: epNumber,
+    paymentGateway: 'easypaisa',
+    paymentAccountTitle: epTitle,
+    paymentAccountNumber: epNumber,
     role: 'user',
     walletBalance: 0,
     activeHens: 0,
@@ -1857,3 +1867,146 @@ export async function cloudSendAdminCustomMessage(
 
   return dispatched;
 }
+
+/**
+ * Realtime listener for Ads Banner Slider
+ */
+export function subscribeToBanners(callback: (banners: FarmBanner[]) => void): Unsubscribe {
+  const bannersDocRef = doc(db, 'settings', 'ads_banners');
+  return onSnapshot(
+    bannersDocRef,
+    (snap) => {
+      if (snap.exists() && snap.data()?.banners && Array.isArray(snap.data().banners)) {
+        callback(snap.data().banners as FarmBanner[]);
+      } else {
+        callback(DEFAULT_BANNERS);
+      }
+    },
+    (err) => {
+      console.warn('Banners listener error, using defaults:', err);
+      callback(DEFAULT_BANNERS);
+    }
+  );
+}
+
+export async function cloudSaveBanners(banners: FarmBanner[]): Promise<void> {
+  const bannersDocRef = doc(db, 'settings', 'ads_banners');
+  await setDoc(bannersDocRef, {
+    banners,
+    updatedAt: new Date().toISOString(),
+  }, { merge: true });
+}
+
+export async function cloudUpdateBanner(banner: FarmBanner): Promise<void> {
+  const bannersDocRef = doc(db, 'settings', 'ads_banners');
+  const snap = await getDoc(bannersDocRef);
+  let currentList = DEFAULT_BANNERS;
+  if (snap.exists() && snap.data()?.banners && Array.isArray(snap.data().banners)) {
+    currentList = snap.data().banners as FarmBanner[];
+  }
+  const idx = currentList.findIndex((b) => b.id === banner.id);
+  let updatedList: FarmBanner[];
+  if (idx >= 0) {
+    updatedList = [...currentList];
+    updatedList[idx] = banner;
+  } else {
+    updatedList = [...currentList, banner];
+  }
+  await setDoc(bannersDocRef, {
+    banners: updatedList,
+    updatedAt: new Date().toISOString(),
+  }, { merge: true });
+}
+
+/**
+ * Realtime listener for Farm Gallery Photos & Videos
+ */
+export function subscribeToGallery(callback: (items: FarmGalleryItem[]) => void): Unsubscribe {
+  const galleryDocRef = doc(db, 'settings', 'farm_gallery');
+  return onSnapshot(
+    galleryDocRef,
+    (snap) => {
+      if (snap.exists() && snap.data()?.items && Array.isArray(snap.data().items)) {
+        callback(snap.data().items as FarmGalleryItem[]);
+      } else {
+        callback(DEFAULT_GALLERY_ITEMS);
+      }
+    },
+    (err) => {
+      console.warn('Gallery listener error, using defaults:', err);
+      callback(DEFAULT_GALLERY_ITEMS);
+    }
+  );
+}
+
+function sanitizeGalleryItems(items: FarmGalleryItem[]): FarmGalleryItem[] {
+  return JSON.parse(JSON.stringify(items));
+}
+
+export async function cloudSaveGallery(items: FarmGalleryItem[]): Promise<void> {
+  const galleryDocRef = doc(db, 'settings', 'farm_gallery');
+  await setDoc(galleryDocRef, {
+    items: sanitizeGalleryItems(items),
+    updatedAt: new Date().toISOString(),
+  }, { merge: true });
+}
+
+export async function cloudAddGalleryItem(item: FarmGalleryItem): Promise<void> {
+  const galleryDocRef = doc(db, 'settings', 'farm_gallery');
+  const snap = await getDoc(galleryDocRef);
+  let currentList = DEFAULT_GALLERY_ITEMS;
+  if (snap.exists() && snap.data()?.items && Array.isArray(snap.data().items)) {
+    currentList = snap.data().items as FarmGalleryItem[];
+  }
+  const updatedList = [item, ...currentList];
+  await setDoc(galleryDocRef, {
+    items: sanitizeGalleryItems(updatedList),
+    updatedAt: new Date().toISOString(),
+  }, { merge: true });
+}
+
+export async function cloudDeleteGalleryItem(id: string): Promise<void> {
+  const galleryDocRef = doc(db, 'settings', 'farm_gallery');
+  const snap = await getDoc(galleryDocRef);
+  let currentList = DEFAULT_GALLERY_ITEMS;
+  if (snap.exists() && snap.data()?.items && Array.isArray(snap.data().items)) {
+    currentList = snap.data().items as FarmGalleryItem[];
+  }
+  const updatedList = currentList.filter((item) => item.id !== id);
+  await setDoc(galleryDocRef, {
+    items: sanitizeGalleryItems(updatedList),
+    updatedAt: new Date().toISOString(),
+  }, { merge: true });
+}
+
+export async function cloudToggleGalleryItemActive(id: string, active: boolean): Promise<void> {
+  const galleryDocRef = doc(db, 'settings', 'farm_gallery');
+  const snap = await getDoc(galleryDocRef);
+  let currentList = DEFAULT_GALLERY_ITEMS;
+  if (snap.exists() && snap.data()?.items && Array.isArray(snap.data().items)) {
+    currentList = snap.data().items as FarmGalleryItem[];
+  }
+  const updatedList = currentList.map((item) => (item.id === id ? { ...item, active, isActive: active } : item));
+  await setDoc(galleryDocRef, {
+    items: sanitizeGalleryItems(updatedList),
+    updatedAt: new Date().toISOString(),
+  }, { merge: true });
+}
+
+export async function cloudLikeGalleryItem(id: string): Promise<void> {
+  const galleryDocRef = doc(db, 'settings', 'farm_gallery');
+  const snap = await getDoc(galleryDocRef);
+  let currentList = DEFAULT_GALLERY_ITEMS;
+  if (snap.exists() && snap.data()?.items && Array.isArray(snap.data().items)) {
+    currentList = snap.data().items as FarmGalleryItem[];
+  }
+  const updatedList = currentList.map((item) =>
+    item.id === id ? { ...item, likesCount: (item.likesCount || 0) + 1 } : item
+  );
+  await setDoc(galleryDocRef, {
+    items: sanitizeGalleryItems(updatedList),
+    updatedAt: new Date().toISOString(),
+  }, { merge: true });
+}
+
+

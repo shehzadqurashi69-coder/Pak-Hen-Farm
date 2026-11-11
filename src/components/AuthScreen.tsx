@@ -30,8 +30,6 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSuccess, lang, onToggl
   // Register fields
   const [fullName, setFullName] = useState('');
   const [phone, setPhone] = useState('');
-  const [easypaisaTitle, setEasypaisaTitle] = useState('');
-  const [easypaisaNumber, setEasypaisaNumber] = useState('');
   const [referralCode, setReferralCode] = useState('');
 
   const [errorMsg, setErrorMsg] = useState('');
@@ -88,10 +86,8 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSuccess, lang, onToggl
     const cleanPass = password.trim();
     const cleanName = fullName.trim();
     const cleanPhone = phone.trim();
-    const cleanEpTitle = easypaisaTitle.trim();
-    const cleanEpNumber = easypaisaNumber.trim();
 
-    if (!cleanName || !cleanEmail || !cleanPass || !cleanPhone || !cleanEpTitle || !cleanEpNumber) {
+    if (!cleanName || !cleanEmail || !cleanPass || !cleanPhone) {
       setErrorMsg(isUr ? 'براہ کرم تمام لازمی فیلڈز مکمل کریں۔' : 'Please fill in all required fields.');
       return;
     }
@@ -108,8 +104,6 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSuccess, lang, onToggl
         password: cleanPass,
         fullName: cleanName,
         phone: cleanPhone,
-        easypaisaTitle: cleanEpTitle,
-        easypaisaNumber: cleanEpNumber,
         referralCode: referralCode.trim() || '',
       });
 
@@ -470,42 +464,6 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSuccess, lang, onToggl
                         placeholder="03001234567"
                         className="w-full rounded-xl border border-[#d4af37]/30 bg-[#051a10]/80 py-2.5 pl-9 pr-3 text-sm text-[#f4efe6] placeholder-[#f4efe6]/30 focus:border-[#d4af37] focus:outline-none focus:ring-1 focus:ring-[#d4af37]"
                       />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs font-semibold text-[#f3df88] mb-1 truncate">
-                        {strings.easypaisaTitleLabel} *
-                      </label>
-                      <div className="relative">
-                        <CreditCard className="absolute left-3 top-3 h-4 w-4 text-[#d4af37]/60" />
-                        <input
-                          type="text"
-                          required
-                          value={easypaisaTitle}
-                          onChange={(e) => setEasypaisaTitle(e.target.value)}
-                          placeholder="Account Title"
-                          className="w-full rounded-xl border border-[#d4af37]/30 bg-[#051a10]/80 py-2.5 pl-9 pr-3 text-xs text-[#f4efe6] placeholder-[#f4efe6]/30 focus:border-[#d4af37] focus:outline-none focus:ring-1 focus:ring-[#d4af37]"
-                        />
-                      </div>
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-[#f3df88] mb-1 truncate">
-                        {strings.easypaisaNumberLabel} *
-                      </label>
-                      <div className="relative">
-                        <Phone className="absolute left-3 top-3 h-4 w-4 text-[#d4af37]/60" />
-                        <input
-                          type="tel"
-                          required
-                          value={easypaisaNumber}
-                          onChange={(e) => setEasypaisaNumber(e.target.value)}
-                          placeholder="03XXXXXXXXX"
-                          className="w-full rounded-xl border border-[#d4af37]/30 bg-[#051a10]/80 py-2.5 pl-9 pr-3 text-xs text-[#f4efe6] placeholder-[#f4efe6]/30 focus:border-[#d4af37] focus:outline-none focus:ring-1 focus:ring-[#d4af37]"
-                        />
-                      </div>
                     </div>
                   </div>
 

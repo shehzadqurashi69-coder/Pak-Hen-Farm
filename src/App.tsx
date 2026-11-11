@@ -4,7 +4,8 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { UserAccount, EggCollectionRecord, GlobalFarmStats, UserAlert } from './types/farm';
+import { UserAccount, EggCollectionRecord, GlobalFarmStats, UserAlert, FarmBanner, FarmGalleryItem } from './types/farm';
+import { DEFAULT_BANNERS, DEFAULT_GALLERY_ITEMS } from './utils/farmRules';
 import {
   getCurrentUser,
   setCurrentUser,
@@ -19,6 +20,8 @@ import {
   subscribeToGlobalStats,
   subscribeToUserAlerts,
   apiMarkAlertsAsRead,
+  subscribeToBanners,
+  subscribeToGallery,
 } from './services/api';
 import { Header } from './components/Header';
 import { AuthScreen } from './components/AuthScreen';
@@ -30,6 +33,9 @@ import { InviteView } from './components/InviteView';
 import { HelpView } from './components/HelpView';
 import { TermsView } from './components/TermsView';
 import { NotificationsView } from './components/NotificationsView';
+import { WalletView } from './components/WalletView';
+import { ProfitView } from './components/ProfitView';
+import { FarmGalleryView } from './components/FarmGalleryView';
 import { AdminPortal } from './components/AdminPortal';
 import { StaffPortal } from './components/StaffPortal';
 
@@ -56,6 +62,8 @@ export default function App() {
     netFresh: 0,
     lastUpdated: new Date().toISOString(),
   });
+  const [banners, setBanners] = useState<FarmBanner[]>(DEFAULT_BANNERS);
+  const [galleryItems, setGalleryItems] = useState<FarmGalleryItem[]>(DEFAULT_GALLERY_ITEMS);
 
   // Keep HTML lang and dir attribute synced with selected language
   useEffect(() => {
@@ -75,11 +83,29 @@ export default function App() {
       setGlobalStats(freshStats);
     });
 
+    // 2. Live Ads Banners listener
+    const unsubBanners = subscribeToBanners((freshBanners) => {
+      if (freshBanners && freshBanners.length > 0) {
+        setBanners(freshBanners);
+      }
+    });
+
+    // 3. Live Farm Gallery listener
+    const unsubGallery = subscribeToGallery((liveGallery) => {
+      if (liveGallery && liveGallery.length > 0) {
+        setGalleryItems(liveGallery);
+      }
+    });
+
     if (!currentUser) {
-      return () => unsubStats();
+      return () => {
+        unsubStats();
+        unsubBanners();
+        unsubGallery();
+      };
     }
 
-    // 2. Live User profile listener (instantly reflects Admin package approvals and egg collections)
+    // 4. Live User profile listener (instantly reflects Admin package approvals and egg collections)
     const unsubUser = subscribeToUserDoc(currentUser.id, async (freshUser) => {
       if (freshUser) {
         setCurrentUserState(freshUser);
@@ -93,13 +119,15 @@ export default function App() {
       }
     });
 
-    // 3. Live User Alerts listener (for Notifications / Farm Inbox)
+    // 5. Live User Alerts listener (for Notifications / Farm Inbox)
     const unsubAlerts = subscribeToUserAlerts(currentUser.id, (freshAlerts) => {
       setUserAlerts(freshAlerts);
     });
 
     return () => {
       unsubStats();
+      unsubBanners();
+      unsubGallery();
       unsubUser();
       unsubAlerts();
     };
@@ -208,11 +236,34 @@ export default function App() {
                 globalStats={globalStats}
                 onNavigate={handleNavigate}
                 unreadAlertsCount={unreadAlertsCount}
+                banners={banners}
                 onCollectedEggs={(record, updatedUser) => {
                   setCurrentUserState(updatedUser);
                   setCollections((prev) => [record, ...prev]);
                 }}
                 lang={lang}
+              />
+            )}
+
+            {activeScreen === 'wallet' && (
+              <WalletView
+                user={currentUser}
+                collections={collections}
+                lang={lang}
+                onNavigate={handleNavigate}
+                onUserUpdated={(updatedUser) => {
+                  setCurrentUserState(updatedUser);
+                  setCurrentUser(updatedUser);
+                }}
+              />
+            )}
+
+            {activeScreen === 'profit' && (
+              <ProfitView
+                user={currentUser}
+                collections={collections}
+                lang={lang}
+                onNavigate={handleNavigate}
               />
             )}
 
@@ -269,6 +320,15 @@ export default function App() {
                   setCurrentUserState(updatedUser);
                   setCurrentUser(updatedUser);
                 }}
+              />
+            )}
+
+            {activeScreen === 'gallery' && (
+              <FarmGalleryView
+                user={currentUser}
+                items={galleryItems}
+                lang={lang}
+                onNavigate={handleNavigate}
               />
             )}
           </>

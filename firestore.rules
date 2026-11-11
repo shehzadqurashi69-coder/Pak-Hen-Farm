@@ -35,5 +35,8 @@ service cloud.firestore {
     match /paymentSettings/{id} {
       allow read, write: if true;
     }
+    match /settings/{id} {
+      allow read, write: if true;
+    }
   }
 }
