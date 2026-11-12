@@ -423,3 +423,51 @@ export async function apiUpdateUserProfile(
   return await cloudUpdateUserProfile(userId, updates);
 }
 
+/**
+ * Uploads media files (photos, videos) up to 50MB to the backend server storage
+ */
+export async function apiUploadMedia(
+  file: File | { dataUrl: string; fileName: string; fileType?: string; folder?: string }
+): Promise<{ success: boolean; url: string; size: number; fileName: string }> {
+  let fileDataUrl: string;
+  let fileName: string;
+  let fileType = '';
+  let folder = 'gallery';
+
+  if (file instanceof File) {
+    fileName = file.name;
+    fileType = file.type;
+    fileDataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = (err) => reject(err);
+      reader.readAsDataURL(file);
+    });
+  } else {
+    fileDataUrl = file.dataUrl;
+    fileName = file.fileName;
+    fileType = file.fileType || '';
+    if (file.folder) folder = file.folder;
+  }
+
+  const response = await fetch('/api/upload', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      file: fileDataUrl,
+      fileName,
+      fileType,
+      folder,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorJson = await response.json().catch(() => ({}));
+    throw new Error(errorJson.error || `Upload failed with status ${response.status}`);
+  }
+
+  return await response.json();
+}
+

@@ -28,6 +28,7 @@ import {
   createTicketInDb,
   replyToTicketInDb,
 } from './server/db';
+import fs from 'fs';
 import { isAdminEmail, generateReferralCode, OFFICIAL_INFO } from './src/utils/farmRules';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -37,7 +38,101 @@ async function startServer() {
   const app = express();
   const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
-  app.use(express.json());
+  // 1. Increase file upload limit to 50MB for media and gallery uploads (photos & videos)
+  app.use(express.json({ limit: '50mb' }));
+  app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
+  // Static uploads directory serving
+  const UPLOAD_DIR = path.resolve(__dirname, 'public', 'uploads');
+  if (!fs.existsSync(UPLOAD_DIR)) {
+    fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+  }
+  app.use('/uploads', express.static(UPLOAD_DIR));
+
+  // ---------------- MEDIA & GALLERY UPLOADS API (50MB Limit) ----------------
+  const MAX_UPLOAD_SIZE = 50 * 1024 * 1024; // 50MB limit
+
+  const handleMediaUpload = async (req: express.Request, res: express.Response) => {
+    try {
+      const { file, fileName, fileType, folder } = req.body;
+      if (!file) {
+        return res.status(400).json({ error: 'No file data provided' });
+      }
+
+      let base64Data = file;
+      let detectedType = fileType || '';
+
+      if (typeof file === 'string' && file.startsWith('data:')) {
+        const matches = file.match(/^data:([^;]+);base64,(.+)$/);
+        if (matches) {
+          detectedType = detectedType || matches[1];
+          base64Data = matches[2];
+        } else {
+          const commaIdx = file.indexOf(',');
+          if (commaIdx !== -1) {
+            base64Data = file.substring(commaIdx + 1);
+          }
+        }
+      }
+
+      const buffer = Buffer.from(base64Data, 'base64');
+      if (buffer.length > MAX_UPLOAD_SIZE) {
+        return res.status(413).json({
+          error: 'Video or photo size is too large. Please upload media under 50MB.',
+        });
+      }
+
+      // Determine file extension
+      let ext = '';
+      if (fileName && path.extname(fileName)) {
+        ext = path.extname(fileName).toLowerCase();
+      } else if (detectedType.includes('mp4')) {
+        ext = '.mp4';
+      } else if (detectedType.includes('webm')) {
+        ext = '.webm';
+      } else if (detectedType.includes('quicktime') || detectedType.includes('mov')) {
+        ext = '.mov';
+      } else if (detectedType.includes('png')) {
+        ext = '.png';
+      } else if (detectedType.includes('jpeg') || detectedType.includes('jpg')) {
+        ext = '.jpg';
+      } else if (detectedType.includes('webp')) {
+        ext = '.webp';
+      } else {
+        ext = '.bin';
+      }
+
+      const safeBaseName = (fileName ? path.basename(fileName, ext) : 'media')
+        .replace(/[^a-zA-Z0-9_-]/g, '_')
+        .substring(0, 30);
+      const uniqueName = `${safeBaseName}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}${ext}`;
+
+      const targetDir = folder ? path.join(UPLOAD_DIR, folder) : UPLOAD_DIR;
+      if (!fs.existsSync(targetDir)) {
+        fs.mkdirSync(targetDir, { recursive: true });
+      }
+
+      const filePath = path.join(targetDir, uniqueName);
+      await fs.promises.writeFile(filePath, buffer);
+
+      const relativeUrl = folder ? `/uploads/${folder}/${uniqueName}` : `/uploads/${uniqueName}`;
+
+      return res.status(200).json({
+        success: true,
+        url: relativeUrl,
+        fileName: uniqueName,
+        size: buffer.length,
+        type: detectedType,
+        message: 'File uploaded successfully within 50MB limit',
+      });
+    } catch (err: any) {
+      console.error('Error handling media upload:', err);
+      return res.status(500).json({ error: err.message || 'Failed to upload media file' });
+    }
+  };
+
+  app.post('/api/upload', handleMediaUpload);
+  app.post('/api/gallery/upload', handleMediaUpload);
 
   // ---------------- AUTH API ----------------
 
