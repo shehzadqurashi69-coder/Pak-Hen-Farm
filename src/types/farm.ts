@@ -156,6 +156,17 @@ export interface PaymentSettings {
   updatedAt?: string;
 }
 
+export interface FarmProfileSettings {
+  farmName: string;
+  farmBio: string;
+  farmBioUr?: string;
+  location: string; // Fully manual, blank if not set (no forced Sargodha)
+  helpline: string;
+  avatar: string;
+  coverUrl?: string;
+  updatedAt?: string;
+}
+
 export type WithdrawalStatus = 'pending' | 'paid' | 'rejected';
 
 export interface WithdrawalRequest {
@@ -182,6 +193,7 @@ export interface SupportTicket {
   subject: string;
   message: string;
   status: 'open' | 'resolved';
+  read?: boolean;
   createdAt: string;
   staffReply?: string;
   repliedAt?: string;

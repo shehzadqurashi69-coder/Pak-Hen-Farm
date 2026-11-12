@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { FarmGalleryItem, UserAccount } from '../types/farm';
+import { FarmGalleryItem, UserAccount, FarmProfileSettings } from '../types/farm';
 import { t } from '../utils/translations';
 import {
   Images,
@@ -24,12 +24,14 @@ import {
   ThumbsUp,
   Award,
   ArrowLeft,
+  Phone,
 } from 'lucide-react';
 import { cloudLikeGalleryItem } from '../services/api';
 
 interface FarmGalleryViewProps {
   user: UserAccount | null;
   items: FarmGalleryItem[];
+  farmProfile?: FarmProfileSettings;
   lang: 'en' | 'ur';
   onNavigate: (screen: string) => void;
 }
@@ -37,11 +39,22 @@ interface FarmGalleryViewProps {
 export const FarmGalleryView: React.FC<FarmGalleryViewProps> = ({
   user,
   items,
+  farmProfile,
   lang,
   onNavigate,
 }) => {
   const strings = t[lang];
   const isUr = lang === 'ur';
+
+  const cleanLocation = (loc?: string): string => {
+    if (!loc) return '';
+    return loc
+      .replace(/,?\s*Sargodha(\s*,?\s*Punjab)?/gi, '')
+      .replace(/\bSargodha\b/gi, '')
+      .replace(/\(\s*\)/g, '')
+      .replace(/^[,\s-]+|[,\s-]+$/g, '')
+      .trim();
+  };
 
   // State: Tab Filter ('all' | 'photos' | 'videos')
   const [activeTab, setActiveTab] = useState<'all' | 'photos' | 'videos'>('all');
@@ -212,7 +225,7 @@ export const FarmGalleryView: React.FC<FarmGalleryViewProps> = ({
         {/* Cover Photo */}
         <div className="relative h-44 sm:h-64 w-full overflow-hidden bg-[#051a10]">
           <img
-            src="/banners/banner-1.jpg"
+            src={farmProfile?.coverUrl || '/banners/banner-1.jpg'}
             alt="Pak Hen Farm Facility Cover"
             className="h-full w-full object-cover object-center brightness-90"
           />
@@ -233,9 +246,9 @@ export const FarmGalleryView: React.FC<FarmGalleryViewProps> = ({
               {/* Profile Avatar */}
               <div className="relative flex h-28 w-28 sm:h-36 sm:w-36 shrink-0 items-center justify-center rounded-full border-4 border-[#051a10] bg-gradient-to-br from-[#0f3b23] to-[#051a10] p-1.5 shadow-2xl shadow-black ring-2 ring-[#d4af37]">
                 <img
-                  src="/golden-hen.svg"
+                  src={farmProfile?.avatar || '/golden-hen.svg'}
                   alt="Pak Hen Farm Official Profile"
-                  className="h-full w-full object-contain drop-shadow"
+                  className="h-full w-full object-contain drop-shadow rounded-full"
                 />
                 <span
                   title="100% Verified Physical Farm"
@@ -249,26 +262,30 @@ export const FarmGalleryView: React.FC<FarmGalleryViewProps> = ({
               <div className="space-y-1">
                 <div className="flex items-center justify-center sm:justify-start gap-2">
                   <h1 className="text-xl sm:text-2xl font-black text-[#f3df88] font-serif">
-                    Pak Hen Farm
+                    {farmProfile?.farmName || 'Pak Hen Farm'}
                   </h1>
                   <span className="rounded-full bg-[#d4af37]/20 border border-[#d4af37]/50 px-2 py-0.5 text-[10px] font-black uppercase text-[#f3df88]">
                     Verified
                   </span>
                 </div>
                 <p className="text-xs sm:text-sm font-semibold text-[#f4efe6]/80 max-w-xl">
-                  {isUr
-                    ? 'پورے پاکستان میں حقیقی فزیکل پولٹری فارمنگ • مصدقہ شرعی مضاربہ شراکت داری'
-                    : 'Real Physical Poultry Farming Across Pakistan • 100% Shariah Mudarabah Partnership'}
+                  {isUr && farmProfile?.farmBioUr
+                    ? farmProfile.farmBioUr
+                    : (farmProfile?.farmBio || 'Real Physical Poultry Farming Across Pakistan • 100% Shariah Mudarabah Partnership')}
                 </p>
                 <div className="flex flex-wrap items-center justify-center sm:justify-start gap-3 text-[11px] text-[#f4efe6]/60 pt-1">
-                  <span className="flex items-center gap-1">
-                    <MapPin className="h-3.5 w-3.5 text-[#d4af37]" />
-                    <span>Sargodha & Nationwide Facilities, Pakistan</span>
-                  </span>
-                  <span>•</span>
-                  <span className="flex items-center gap-1">
-                    <Calendar className="h-3.5 w-3.5 text-[#d4af37]" />
-                    <span>Est. 2024</span>
+                  {farmProfile?.location && farmProfile.location.trim() ? (
+                    <>
+                      <span className="flex items-center gap-1 text-[#f3df88]">
+                        <MapPin className="h-3.5 w-3.5 text-[#d4af37]" />
+                        <span>{farmProfile.location}</span>
+                      </span>
+                      <span>•</span>
+                    </>
+                  ) : null}
+                  <span className="flex items-center gap-1 text-[#f3df88] font-bold">
+                    <Phone className="h-3.5 w-3.5 text-[#d4af37]" />
+                    <span>Helpline: {farmProfile?.helpline || '03105625924'}</span>
                   </span>
                   <span>•</span>
                   <span className="text-emerald-400 font-bold">5,000+ Hens Capacity</span>
@@ -411,7 +428,7 @@ export const FarmGalleryView: React.FC<FarmGalleryViewProps> = ({
                         <span>•</span>
                         <span className="flex items-center gap-0.5 text-emerald-400">
                           <MapPin className="h-3 w-3" />
-                          <span>{item.location || 'Sargodha, Punjab'}</span>
+                          <span>{cleanLocation(item.location) || 'Pak Hen Farm (Facility)'}</span>
                         </span>
                       </div>
                     </div>
@@ -569,7 +586,7 @@ export const FarmGalleryView: React.FC<FarmGalleryViewProps> = ({
                     {isUr && item.titleUr ? item.titleUr : item.title}
                   </h4>
                   <div className="flex items-center justify-between text-[10px] text-white/70">
-                    <span>{item.location || 'Sargodha Farm'}</span>
+                    <span>{cleanLocation(item.location) || 'Pak Hen Farm'}</span>
                     <span className="flex items-center gap-1">
                       <ThumbsUp className="h-2.5 w-2.5" />
                       <span>{item.likesCount || 0}</span>
@@ -595,7 +612,7 @@ export const FarmGalleryView: React.FC<FarmGalleryViewProps> = ({
                 {lightboxIndex! + 1} / {photoItems.length}
               </span>
               <span className="text-xs text-white/70">
-                {currentLightboxItem.location || 'Pak Hen Farm Facility'}
+                {cleanLocation(currentLightboxItem.location) || 'Pak Hen Farm Facility'}
               </span>
             </div>
 
@@ -686,7 +703,7 @@ export const FarmGalleryView: React.FC<FarmGalleryViewProps> = ({
                   <h3 className="text-sm sm:text-base font-bold text-[#f3df88]">
                     {isUr && playingVideo.titleUr ? playingVideo.titleUr : playingVideo.title}
                   </h3>
-                  <span className="text-[11px] text-[#f4efe6]/60">{playingVideo.location}</span>
+                  <span className="text-[11px] text-[#f4efe6]/60">{cleanLocation(playingVideo.location) || 'Pak Hen Farm Facility'}</span>
                 </div>
               </div>
 

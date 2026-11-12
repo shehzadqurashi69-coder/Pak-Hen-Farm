@@ -12,6 +12,7 @@ import {
   SupportTicket,
   FarmBanner,
   FarmGalleryItem,
+  FarmProfileSettings,
 } from '../types/farm';
 import {
   apiGetOrders,
@@ -52,8 +53,11 @@ import {
   cloudAddGalleryItem,
   cloudDeleteGalleryItem,
   cloudToggleGalleryItemActive,
+  cloudSaveFarmProfile,
+  cloudToggleTicketRead,
+  cleanFakeUsers,
 } from '../services/api';
-import { INITIAL_SHEDS, SHED_CAPACITY, MEDICAL_FEE_PKR, calculateShedDynamicSum, DEFAULT_BANNERS, DEFAULT_GALLERY_ITEMS } from '../utils/farmRules';
+import { INITIAL_SHEDS, SHED_CAPACITY, MEDICAL_FEE_PKR, calculateShedDynamicSum, DEFAULT_BANNERS, DEFAULT_GALLERY_ITEMS, DEFAULT_FARM_PROFILE } from '../utils/farmRules';
 import { t } from '../utils/translations';
 import {
   ShieldCheck,
@@ -100,6 +104,9 @@ import {
   Landmark,
   Smartphone,
   Eye,
+  EyeOff,
+  CheckCheck,
+  Filter,
   RotateCcw,
   Images,
   Film,
@@ -110,9 +117,10 @@ import {
 interface AdminPortalProps {
   adminUser: UserAccount;
   lang: 'en' | 'ur';
+  farmProfile?: FarmProfileSettings;
 }
 
-export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang }) => {
+export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmProfile }) => {
   const strings = t[lang];
   const isUr = lang === 'ur';
 
@@ -171,6 +179,29 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang }) => 
   const [newGalleryLocation, setNewGalleryLocation] = useState('Islamabad Physical Farm (Shed-101)');
   const [isUploadingGalleryFile, setIsUploadingGalleryFile] = useState(false);
 
+  // Farm Profile & Header State (Requirement 1: Fully Manual Admin Profile - No Forced Sargodha)
+  const [profileFarmName, setProfileFarmName] = useState(farmProfile?.farmName || 'Pak Hen Farm');
+  const [profileBio, setProfileBio] = useState(farmProfile?.farmBio || 'Real Physical Poultry Farming Across Pakistan • 100% Shariah Mudarabah Partnership');
+  const [profileBioUr, setProfileBioUr] = useState(farmProfile?.farmBioUr || 'پاکستان بھر میں حقیقی فارمنگ • 100٪ شرعی مضاربہ شراکت داری');
+  const [profileLocation, setProfileLocation] = useState(farmProfile?.location || '');
+  const [profileHelpline, setProfileHelpline] = useState(farmProfile?.helpline || '03105625924');
+  const [profileAvatar, setProfileAvatar] = useState(farmProfile?.avatar || '/golden-hen.svg');
+  const [profileCover, setProfileCover] = useState(farmProfile?.coverUrl || '/banners/banner-1.jpg');
+  const [isSavingProfile, setIsSavingProfile] = useState(false);
+  const [profileFeedbackMsg, setProfileFeedbackMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (farmProfile) {
+      setProfileFarmName(farmProfile.farmName || 'Pak Hen Farm');
+      setProfileBio(farmProfile.farmBio || '');
+      setProfileBioUr(farmProfile.farmBioUr || '');
+      setProfileLocation(farmProfile.location || '');
+      setProfileHelpline(farmProfile.helpline || '03105625924');
+      setProfileAvatar(farmProfile.avatar || '/golden-hen.svg');
+      setProfileCover(farmProfile.coverUrl || '/banners/banner-1.jpg');
+    }
+  }, [farmProfile]);
+
   // Custom Admin Greeting for User Checkout Screen (Requirement 2)
   const [customGreeting, setCustomGreeting] = useState('');
   const [customGreetingUr, setCustomGreetingUr] = useState('');
@@ -179,6 +210,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang }) => 
 
   // SOS Helpdesk Tickets State (Admin SOS Inbox)
   const [tickets, setTickets] = useState<SupportTicket[]>([]);
+  const [sosFilter, setSosFilter] = useState<'all' | 'unread' | 'read'>('all');
   const [selectedTicketForReply, setSelectedTicketForReply] = useState<SupportTicket | null>(null);
   const [ticketReplyText, setTicketReplyText] = useState('');
   const [isReplyingTicket, setIsReplyingTicket] = useState(false);
@@ -352,8 +384,15 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang }) => 
     .filter((w) => w.status === 'pending')
     .reduce((sum, w) => sum + w.amount, 0);
 
-  const pendingMedicalList = medicalPayments.filter((m) => m.status === 'pending');
   const openTicketsList = tickets.filter((t) => t.status === 'open');
+  const unreadTicketsList = tickets.filter((t) => !t.read && t.status === 'open');
+  const readTicketsList = tickets.filter((t) => !!t.read || t.status === 'resolved');
+
+  const filteredTickets = tickets.filter((t) => {
+    if (sosFilter === 'unread') return !t.read && t.status === 'open';
+    if (sosFilter === 'read') return !!t.read || t.status === 'resolved';
+    return true;
+  });
 
   const netFarmBalance = totalApprovedDeposits - totalPaidOut;
 
@@ -662,10 +701,22 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang }) => 
     }
   };
 
-  // Farm Gallery Management Handlers (Requirement 2: Admin Media & Video Management)
+  // 1. Increase Video Upload Size Limit (Remove 1MB restriction, allow up to 50MB)
+  const MAX_VIDEO_SIZE = 50 * 1024 * 1024; // 50MB limit for smooth uploads
+
+  // Farm Gallery Management Handlers (Admin Media & Video Management)
   const handleGalleryFileUpload = (file: File) => {
     if (!file) return;
+    if (file.size > MAX_VIDEO_SIZE) {
+      setGalleryFeedbackMsg(
+        isUr
+          ? 'ویڈیو کا سائز بہت بڑا ہے۔ براہ کرم 50MB سے کم کی ویڈیو اپ لوڈ کریں۔'
+          : 'Video size is too large. Please upload a video under 50MB.'
+      );
+      return;
+    }
     setIsUploadingGalleryFile(true);
+    setGalleryFeedbackMsg(null);
     const reader = new FileReader();
     reader.onload = (e) => {
       const result = e.target?.result as string;
@@ -759,6 +810,77 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang }) => 
     }
   };
 
+  // Farm Profile Actions (Requirement 1: Fully Manual Admin Profile & Header - No forced Sargodha)
+  const handleSaveFarmProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSavingProfile(true);
+    setProfileFeedbackMsg(null);
+    try {
+      const updatedProfile: FarmProfileSettings = {
+        farmName: profileFarmName.trim() || 'Pak Hen Farm',
+        farmBio: profileBio.trim(),
+        farmBioUr: profileBioUr.trim(),
+        location: profileLocation.trim(), // Blank if empty: strictly NO FORCED SARGODHA!
+        helpline: profileHelpline.trim() || '03105625924',
+        avatar: profileAvatar.trim() || '/golden-hen.svg',
+        coverUrl: profileCover.trim() || '/banners/banner-1.jpg',
+        updatedAt: new Date().toISOString(),
+      };
+      await cloudSaveFarmProfile(updatedProfile);
+      setProfileFeedbackMsg(isUr ? 'فارم پروفائل اور ہیڈر کامیابی سے محفوظ ہو گیا!' : 'Official farm profile & header saved successfully!');
+      setTimeout(() => setProfileFeedbackMsg(null), 4000);
+    } catch (err: any) {
+      console.error('Failed to save farm profile', err);
+      setProfileFeedbackMsg(err.message || 'Error saving farm profile');
+    } finally {
+      setIsSavingProfile(false);
+    }
+  };
+
+  const handleResetProfileToDefaults = async () => {
+    try {
+      setIsSavingProfile(true);
+      await cloudSaveFarmProfile(DEFAULT_FARM_PROFILE);
+      setProfileFarmName(DEFAULT_FARM_PROFILE.farmName);
+      setProfileBio(DEFAULT_FARM_PROFILE.farmBio);
+      setProfileBioUr(DEFAULT_FARM_PROFILE.farmBioUr || '');
+      setProfileLocation(DEFAULT_FARM_PROFILE.location);
+      setProfileHelpline(DEFAULT_FARM_PROFILE.helpline);
+      setProfileAvatar(DEFAULT_FARM_PROFILE.avatar);
+      setProfileCover(DEFAULT_FARM_PROFILE.coverUrl || '');
+      setProfileFeedbackMsg(isUr ? 'فارم پروفائل اصل حالت پر بحال ہو گئی!' : 'Farm profile reset to clean defaults (location blank).');
+      setTimeout(() => setProfileFeedbackMsg(null), 3500);
+    } catch (err: any) {
+      setProfileFeedbackMsg(err.message || 'Error resetting farm profile');
+    } finally {
+      setIsSavingProfile(false);
+    }
+  };
+
+  const handleAvatarFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        setProfileAvatar(reader.result);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleCoverFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        setProfileCover(reader.result);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
   const handleResetGalleryToDefaults = async () => {
     try {
       setIsSavingGallery(true);
@@ -771,6 +893,66 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang }) => 
     } finally {
       setIsSavingGallery(false);
     }
+  };
+
+  // 2. SOS Notification Read/Unread Toggle Logic (Requirement 2)
+  const markSOSAsRead = async (notificationId: string, readState: boolean = true) => {
+    setTickets((prev) =>
+      prev.map((item) => (item.id === notificationId ? { ...item, read: readState } : item))
+    );
+
+    try {
+      let sosList: any[] = JSON.parse(localStorage.getItem('adminSOSInbox') || '[]');
+      const idx = sosList.findIndex((item) => item.id === notificationId);
+      if (idx >= 0) {
+        sosList[idx].read = readState;
+      } else {
+        sosList.push({ id: notificationId, read: readState });
+      }
+      localStorage.setItem('adminSOSInbox', JSON.stringify(sosList));
+    } catch (e) {}
+
+    try {
+      await cloudToggleTicketRead(notificationId, readState);
+    } catch (e) {
+      console.warn('Error syncing SOS read status to cloud:', e);
+    }
+  };
+
+  const markAllSOSAsRead = async () => {
+    const updated = tickets.map((t) => ({ ...t, read: true }));
+    setTickets(updated);
+    try {
+      localStorage.setItem(
+        'adminSOSInbox',
+        JSON.stringify(updated.map((t) => ({ id: t.id, read: true })))
+      );
+    } catch (e) {}
+
+    const unreadOnes = tickets.filter((t) => !t.read);
+    for (const t of unreadOnes) {
+      cloudToggleTicketRead(t.id, true).catch(() => {});
+    }
+  };
+
+  // 3. Remove Fake Demo Users & Keep Only Real Registered Users (Requirement 3)
+  const handleCleanFakeUsers = () => {
+    cleanFakeUsers();
+    setUsersList((prev) =>
+      prev.filter(
+        (user) =>
+          user.email &&
+          !user.email.toLowerCase().includes('ai-studio-dummy') &&
+          !user.email.toLowerCase().includes('dummy') &&
+          !user.email.toLowerCase().includes('testmember99@')
+      )
+    );
+    setUserActionMessage(
+      isUr
+        ? 'جعلی اور ڈمی صارفین کامیابی سے صاف کر دیے گئے۔ صرف حقیقی رجسٹرڈ سرمایہ کار باقی ہیں۔'
+        : 'Fake and dummy studio users cleaned successfully. Only verified real registered accounts preserved.'
+    );
+    setTimeout(() => setUserActionMessage(null), 4000);
   };
 
   // SOS Ticket Reply Action
@@ -967,6 +1149,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang }) => 
 
   const pendingOrders = orders.filter((o) => o.status === 'pending');
   const pendingWithdrawalsList = withdrawals.filter((w) => w.status === 'pending');
+  const pendingMedicalList = medicalPayments.filter((m) => m.status === 'pending');
 
   // Filtered users for Users Directory
   const filteredUsers = usersList.filter((u) => {
@@ -1194,11 +1377,15 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang }) => 
           <span className="flex items-center justify-center gap-1">
             <LifeBuoy className="h-3.5 w-3.5" />
             <span>{isUr ? 'SOS ان باکس' : 'SOS Inbox'}</span>
-            {openTicketsList.length > 0 && (
-              <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-rose-500 text-[10px] font-black text-white animate-pulse">
+            {unreadTicketsList.length > 0 ? (
+              <span className="inline-flex h-4 min-w-4 px-1 items-center justify-center rounded-full bg-rose-500 text-[10px] font-black text-white animate-pulse">
+                {unreadTicketsList.length}
+              </span>
+            ) : openTicketsList.length > 0 ? (
+              <span className="inline-flex h-4 min-w-4 px-1 items-center justify-center rounded-full bg-[#051a10]/60 text-[10px] font-bold text-[#f3df88]">
                 {openTicketsList.length}
               </span>
-            )}
+            ) : null}
           </span>
         </button>
 
@@ -1281,17 +1468,28 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang }) => 
               </p>
             </div>
 
-            {/* Search filter input & Broadcast button */}
+            {/* Search filter input, Clean Dummy Users & Broadcast button */}
             <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
               <button
+                type="button"
+                onClick={handleCleanFakeUsers}
+                className="admin-btn text-xs font-bold whitespace-nowrap"
+                title="Remove dummy and fake studio accounts and keep only real registered users"
+              >
+                <Trash2 className="h-3.5 w-3.5 text-rose-400" />
+                <span>{isUr ? 'ڈمی اکاؤنٹس صاف کریں' : 'Clean Dummy Users'}</span>
+              </button>
+
+              <button
+                type="button"
                 onClick={() => setMessageModalTarget('ALL')}
-                className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-[#d4af37] to-[#b38f20] px-3.5 py-2 text-xs font-black text-[#051a10] hover:brightness-105 active:scale-95 transition-all cursor-pointer shadow-md whitespace-nowrap"
+                className="admin-btn-primary text-xs font-bold whitespace-nowrap"
               >
                 <Send className="h-3.5 w-3.5" />
                 <span>{strings.adminBroadcastBtn}</span>
               </button>
 
-              <div className="relative min-w-[200px] flex-1">
+              <div className="relative min-w-[180px] flex-1">
                 <Search className="absolute left-3 top-2.5 h-4 w-4 text-[#d4af37]/60" />
                 <input
                   type="text"
@@ -1433,8 +1631,9 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang }) => 
                         <div className="flex items-center gap-2 flex-wrap">
                           {/* Send Official Farm Message button */}
                           <button
+                            type="button"
                             onClick={() => setMessageModalTarget(u)}
-                            className="flex items-center gap-1 rounded-xl border border-[#d4af37]/40 bg-[#051a10] px-3 py-1.5 text-xs font-bold text-[#f3df88] hover:bg-[#d4af37]/20 active:scale-95 transition-all cursor-pointer shadow-sm"
+                            className="admin-btn text-xs"
                           >
                             <Send className="h-3 w-3 text-[#d4af37]" />
                             <span>{strings.adminSendMessageBtn}</span>
@@ -1443,18 +1642,20 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang }) => 
                           {/* REVERSIBLE TOGGLE 1: SUSPEND <-> UNSUSPEND */}
                           {isSuspended ? (
                             <button
+                              type="button"
                               onClick={() => handleSetUserStatus(u, 'active')}
                               disabled={isUpdating}
-                              className="flex items-center gap-1 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 px-3 py-1.5 text-xs font-black text-[#051a10] hover:brightness-105 active:scale-95 transition-all cursor-pointer shadow-md disabled:opacity-50"
+                              className="admin-btn-primary text-xs disabled:opacity-50"
                             >
                               <UserCheck className="h-3.5 w-3.5" />
                               <span>{isUpdating ? '...' : strings.actionUnsuspend}</span>
                             </button>
                           ) : (
                             <button
+                              type="button"
                               onClick={() => handleSetUserStatus(u, 'suspended')}
                               disabled={isUpdating}
-                              className="flex items-center gap-1 rounded-xl border border-amber-500/50 bg-amber-950/40 px-3 py-1.5 text-xs font-bold text-amber-300 hover:bg-amber-900/60 active:scale-95 transition-all cursor-pointer disabled:opacity-50"
+                              className="admin-btn text-xs text-amber-300 border-amber-500/50 hover:bg-amber-950/40 disabled:opacity-50"
                             >
                               <UserX className="h-3.5 w-3.5" />
                               <span>{isUpdating ? '...' : strings.actionSuspend}</span>
@@ -1464,18 +1665,20 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang }) => 
                           {/* REVERSIBLE TOGGLE 2: BAN <-> UNBAN */}
                           {isBanned ? (
                             <button
+                              type="button"
                               onClick={() => handleSetUserStatus(u, 'active')}
                               disabled={isUpdating}
-                              className="flex items-center gap-1 rounded-xl bg-gradient-to-r from-emerald-500 to-emerald-600 px-3 py-1.5 text-xs font-black text-[#051a10] hover:brightness-105 active:scale-95 transition-all cursor-pointer shadow-md disabled:opacity-50"
+                              className="admin-btn-primary text-xs disabled:opacity-50"
                             >
                               <UserCheck className="h-3.5 w-3.5" />
                               <span>{isUpdating ? '...' : strings.actionUnban}</span>
                             </button>
                           ) : (
                             <button
+                              type="button"
                               onClick={() => handleSetUserStatus(u, 'banned')}
                               disabled={isUpdating}
-                              className="flex items-center gap-1 rounded-xl border border-rose-500/50 bg-rose-950/50 px-3 py-1.5 text-xs font-bold text-rose-300 hover:bg-rose-900/70 active:scale-95 transition-all cursor-pointer disabled:opacity-50"
+                              className="admin-btn-danger text-xs disabled:opacity-50"
                             >
                               <Ban className="h-3.5 w-3.5" />
                               <span>{isUpdating ? '...' : strings.actionBan}</span>
@@ -1645,22 +1848,20 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang }) => 
                       <div className="flex items-center justify-end gap-2 pt-2 border-t border-white/5">
                         {/* ACTIVATED REJECT BUTTON (NO window.prompt) */}
                         <button
+                          type="button"
                           onClick={() => handleOpenRejectOrder(ord)}
                           disabled={!!approvingOrderIds[ord.id]}
-                          className="flex items-center gap-1.5 rounded-xl border border-rose-500/40 bg-rose-950/40 px-4 py-2 text-xs font-bold text-rose-200 hover:bg-rose-900/60 cursor-pointer active:scale-95 transition-all"
+                          className="admin-btn-danger text-xs disabled:opacity-50"
                         >
                           <XCircle className="h-4 w-4" />
                           <span>{strings.rejectBtn}</span>
                         </button>
 
                         <button
+                          type="button"
                           onClick={() => handleApproveOrder(ord.id)}
                           disabled={!!approvingOrderIds[ord.id]}
-                          className={`flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-[#d4af37] to-[#b38f20] px-4 py-2 text-xs font-black text-[#051a10] shadow-md shadow-[#d4af37]/20 transition-all ${
-                            approvingOrderIds[ord.id]
-                              ? 'opacity-60 cursor-not-allowed scale-95'
-                              : 'hover:brightness-105 cursor-pointer active:scale-95'
-                          }`}
+                          className="admin-btn-primary text-xs disabled:opacity-50"
                         >
                           {approvingOrderIds[ord.id] ? (
                             <>
@@ -1762,8 +1963,9 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang }) => 
                     <div className="flex items-center justify-end gap-2 pt-2 border-t border-white/5">
                       {/* ACTIVATED REJECT & REFUND BUTTON (NO window.prompt) */}
                       <button
+                        type="button"
                         onClick={() => handleOpenRejectWithdrawal(w)}
-                        className="flex items-center gap-1.5 rounded-xl border border-rose-500/40 bg-rose-950/40 px-4 py-2 text-xs font-bold text-rose-200 hover:bg-rose-900/60 cursor-pointer active:scale-95 transition-all"
+                        className="admin-btn-danger text-xs"
                       >
                         <XCircle className="h-4 w-4" />
                         <span>{isUr ? 'مسترد اور رقم والٹ میں واپس' : 'Reject & Refund'}</span>
@@ -1771,8 +1973,9 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang }) => 
 
                       {/* ACTIVATED MARK PAID BUTTON (NO window.prompt) */}
                       <button
+                        type="button"
                         onClick={() => handleOpenMarkPaid(w)}
-                        className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 px-4 py-2 text-xs font-black text-[#051a10] hover:brightness-105 cursor-pointer shadow-md shadow-emerald-500/20 active:scale-95 transition-all"
+                        className="admin-btn-primary text-xs"
                       >
                         <CheckCircle2 className="h-4 w-4" />
                         <span>{strings.markAsPaidBtn}</span>
@@ -2434,6 +2637,246 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang }) => 
       {/* TAB: FARM GALLERY MANAGEMENT (Requirement 2: Farm Photos & Videos Management) */}
       {activeTab === 'gallery' && (
         <div className="space-y-6">
+          {/* REQUIREMENT 1: FULLY MANUAL ADMIN FARM PROFILE & HEADER (No forced Sargodha) */}
+          <div className="rounded-3xl border-2 border-[#d4af37]/60 bg-gradient-to-b from-[#0e3522] via-[#092618] to-[#051a10] p-5 sm:p-6 shadow-2xl space-y-5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#d4af37]/30 pb-4">
+              <div>
+                <div className="flex items-center gap-2">
+                  <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-[#d4af37] to-[#aa8010] text-[#051a10] shadow-md shadow-[#d4af37]/30">
+                    <Feather className="h-5 w-5" />
+                  </div>
+                  <h3 className="text-lg font-black text-[#f3df88]">
+                    {isUr ? 'سرکاری فارم پروفائل اور ہیڈر سیٹنگز' : 'Official Farm Profile & Header Settings'}
+                  </h3>
+                </div>
+                <p className="text-xs text-[#f4efe6]/70 mt-1">
+                  {isUr
+                    ? 'فارم کا نام، بائیو، ہیلپ لائن (03105625924)، لوگو اور کور کا انتظام کریں۔ لوکیشن خالی رکھی جا سکتی ہے (کوئی جبری سرگودھا نہیں)۔'
+                    : 'Configure the public farm name, bio, official helpline (03105625924), avatar/logo, and cover banner. Location is completely optional: leave blank if not needed (no forced Sargodha).'}
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleResetProfileToDefaults}
+                disabled={isSavingProfile}
+                className="flex items-center gap-1.5 rounded-xl border border-[#d4af37]/40 bg-[#051a10] px-3.5 py-2 text-xs font-bold text-[#d4af37] hover:bg-[#d4af37]/10 transition-colors cursor-pointer self-start sm:self-auto"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                <span>{isUr ? 'اصل پروفائل پر بحال کریں' : 'Reset Profile Defaults'}</span>
+              </button>
+            </div>
+
+            {profileFeedbackMsg && (
+              <div className="flex items-center gap-2 rounded-2xl border border-[#d4af37]/50 bg-[#0a2618] p-3.5 text-xs sm:text-sm font-semibold text-[#f3df88] shadow-lg animate-in fade-in">
+                <CheckCircle2 className="h-4 w-4 text-[#d4af37] shrink-0" />
+                <span>{profileFeedbackMsg}</span>
+              </div>
+            )}
+
+            {/* LIVE MINI PREVIEW OF PROFILE HEADER */}
+            <div className="rounded-2xl border border-[#d4af37]/30 bg-[#051a10]/80 p-3 sm:p-4 overflow-hidden">
+              <span className="text-[10px] uppercase font-black tracking-widest text-[#d4af37]/70 block mb-2">
+                {isUr ? 'لائیو پریویو (سوشل ہیڈر)' : 'Live Public Header Preview'}
+              </span>
+              <div className="relative rounded-xl overflow-hidden border border-[#d4af37]/20 bg-[#0a2618]">
+                {/* Cover Banner */}
+                <div className="h-24 sm:h-28 w-full bg-[#051a10] relative overflow-hidden">
+                  <img
+                    src={profileCover || '/banners/banner-1.jpg'}
+                    alt="Farm Cover"
+                    className="w-full h-full object-cover"
+                    onError={(e) => {
+                      (e.currentTarget as HTMLImageElement).src = '/banners/banner-1.jpg';
+                    }}
+                  />
+                  <div className="absolute inset-0 bg-gradient-to-t from-[#051a10] via-black/30 to-transparent" />
+                </div>
+
+                {/* Avatar & Info */}
+                <div className="p-3 sm:p-4 -mt-10 flex flex-col sm:flex-row sm:items-end justify-between gap-3 relative z-10">
+                  <div className="flex items-end gap-3">
+                    <img
+                      src={profileAvatar || '/golden-hen.svg'}
+                      alt="Avatar"
+                      className="h-16 w-16 sm:h-18 sm:w-18 rounded-2xl border-2 border-[#d4af37] bg-[#051a10] object-cover shadow-xl p-1"
+                      onError={(e) => {
+                        (e.currentTarget as HTMLImageElement).src = '/golden-hen.svg';
+                      }}
+                    />
+                    <div className="pb-1">
+                      <h4 className="text-base sm:text-lg font-black text-[#f3df88] flex items-center gap-1.5">
+                        <span>{profileFarmName || 'Pak Hen Farm'}</span>
+                        <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
+                      </h4>
+                      <p className="text-[11px] text-[#f4efe6]/80 max-w-md line-clamp-1">
+                        {isUr && profileBioUr ? profileBioUr : profileBio || 'Real Physical Poultry Farming Across Pakistan'}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 text-[11px] font-semibold text-[#f4efe6]/80 pb-1">
+                    {profileLocation.trim() && (
+                      <span className="flex items-center gap-1 rounded-lg bg-[#0a2618] border border-[#d4af37]/30 px-2.5 py-1 text-[#f3df88]">
+                        📍 {profileLocation.trim()}
+                      </span>
+                    )}
+                    <span className="flex items-center gap-1 rounded-lg bg-[#0a2618] border border-[#d4af37]/30 px-2.5 py-1 text-emerald-400">
+                      📞 {profileHelpline || '03105625924'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* FORM CONTROLS */}
+            <form onSubmit={handleSaveFarmProfile} className="space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                {/* Farm Name */}
+                <div>
+                  <label className="block text-xs font-bold text-[#f3df88] mb-1">
+                    {isUr ? 'فارم کا نام (Farm Name) *' : 'Farm Display Name *'}
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={profileFarmName}
+                    onChange={(e) => setProfileFarmName(e.target.value)}
+                    placeholder="Pak Hen Farm"
+                    className="w-full rounded-xl border border-[#d4af37]/30 bg-[#051a10] px-3.5 py-2.5 text-xs text-[#f4efe6] focus:border-[#d4af37] focus:outline-none"
+                  />
+                </div>
+
+                {/* Helpline */}
+                <div>
+                  <label className="block text-xs font-bold text-[#f3df88] mb-1">
+                    {isUr ? 'سرکاری ہیلپ لائن (Helpline) *' : 'Official Helpline (WhatsApp/Call) *'}
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={profileHelpline}
+                    onChange={(e) => setProfileHelpline(e.target.value)}
+                    placeholder="03105625924"
+                    className="w-full rounded-xl border border-[#d4af37]/30 bg-[#051a10] px-3.5 py-2.5 text-xs text-[#f4efe6] font-mono focus:border-[#d4af37] focus:outline-none"
+                  />
+                </div>
+
+                {/* Location (Completely Optional - No Forced Sargodha) */}
+                <div>
+                  <label className="block text-xs font-bold text-[#f3df88] mb-1">
+                    {isUr ? 'لوکیشن (اختیاری - خالی رہنے دیں اگر شہر نہیں دکھانا)' : 'Location (Optional - Leave blank if none)'}
+                  </label>
+                  <input
+                    type="text"
+                    value={profileLocation}
+                    onChange={(e) => setProfileLocation(e.target.value)}
+                    placeholder="Leave blank or e.g. Islamabad / Nationwide"
+                    className="w-full rounded-xl border border-[#d4af37]/30 bg-[#051a10] px-3.5 py-2.5 text-xs text-[#f4efe6] focus:border-[#d4af37] focus:outline-none"
+                  />
+                  <p className="text-[10px] text-[#f4efe6]/50 mt-1">
+                    {isUr ? 'اگر خالی چھوڑا جائے تو ہیڈر میں کوئی شہر ظاہر نہیں ہوگا (کوئی جبری سرگودھا نہیں)۔' : 'No forced Sargodha! If left blank, location is cleanly hidden.'}
+                  </p>
+                </div>
+              </div>
+
+              {/* Bio English & Urdu */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-[#f3df88] mb-1">
+                    {isUr ? 'بائیو انگریزی میں (Bio in English)' : 'Bio / Motto (English)'}
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={profileBio}
+                    onChange={(e) => setProfileBio(e.target.value)}
+                    placeholder="Real Physical Poultry Farming Across Pakistan • 100% Shariah Mudarabah Partnership"
+                    className="w-full rounded-xl border border-[#d4af37]/30 bg-[#051a10] px-3.5 py-2 text-xs text-[#f4efe6] focus:border-[#d4af37] focus:outline-none resize-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-[#f3df88] mb-1">
+                    {isUr ? 'بائیو اردو میں (Bio in Urdu - اختیاری)' : 'Bio / Motto (Urdu - Optional)'}
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={profileBioUr}
+                    onChange={(e) => setProfileBioUr(e.target.value)}
+                    placeholder="پاکستان بھر میں حقیقی فارمنگ • 100٪ شرعی مضاربہ شراکت داری"
+                    className="w-full rounded-xl border border-[#d4af37]/30 bg-[#051a10] px-3.5 py-2 text-xs text-[#f4efe6] focus:border-[#d4af37] focus:outline-none resize-none text-right"
+                    dir="rtl"
+                  />
+                </div>
+              </div>
+
+              {/* Avatar & Cover Photos */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                {/* Avatar / Logo */}
+                <div className="rounded-2xl border border-[#d4af37]/25 bg-[#051a10] p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-bold text-[#f3df88]">
+                      {isUr ? 'پروفائل اوتار / فارم لوگو' : 'Farm Avatar / Logo'}
+                    </label>
+                    <label className="flex items-center gap-1 text-[11px] font-bold text-[#d4af37] hover:underline cursor-pointer">
+                      <Upload className="h-3 w-3" />
+                      <span>{isUr ? 'فائل منتخب کریں' : 'Upload File'}</span>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={handleAvatarFileUpload}
+                      />
+                    </label>
+                  </div>
+                  <input
+                    type="text"
+                    value={profileAvatar}
+                    onChange={(e) => setProfileAvatar(e.target.value)}
+                    placeholder="/golden-hen.svg or image URL"
+                    className="w-full rounded-xl border border-[#d4af37]/30 bg-[#0a2618] px-3 py-2 text-xs text-[#f4efe6] focus:border-[#d4af37] focus:outline-none"
+                  />
+                </div>
+
+                {/* Cover Banner */}
+                <div className="rounded-2xl border border-[#d4af37]/25 bg-[#051a10] p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-bold text-[#f3df88]">
+                      {isUr ? 'کور فوٹو بینر (Cover Banner)' : 'Cover Banner Photo'}
+                    </label>
+                    <label className="flex items-center gap-1 text-[11px] font-bold text-[#d4af37] hover:underline cursor-pointer">
+                      <Upload className="h-3 w-3" />
+                      <span>{isUr ? 'فائل منتخب کریں' : 'Upload File'}</span>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={handleCoverFileUpload}
+                      />
+                    </label>
+                  </div>
+                  <input
+                    type="text"
+                    value={profileCover}
+                    onChange={(e) => setProfileCover(e.target.value)}
+                    placeholder="/banners/banner-1.jpg or image URL"
+                    className="w-full rounded-xl border border-[#d4af37]/30 bg-[#0a2618] px-3 py-2 text-xs text-[#f4efe6] focus:border-[#d4af37] focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {/* Submit Button */}
+              <div className="flex items-center justify-end pt-2">
+                <button
+                  type="submit"
+                  disabled={isSavingProfile}
+                  className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-[#d4af37] via-[#f3df88] to-[#aa8010] px-6 py-2.5 text-xs font-black text-[#051a10] shadow-lg shadow-[#d4af37]/30 hover:brightness-105 active:scale-95 transition-all cursor-pointer disabled:opacity-50"
+                >
+                  <Check className="h-4 w-4 stroke-[3]" />
+                  <span>{isSavingProfile ? (isUr ? 'محفوظ ہو رہا ہے...' : 'Saving Profile...') : (isUr ? 'پروفائل محفوظ کریں' : 'Save Farm Profile & Header')}</span>
+                </button>
+              </div>
+            </form>
+          </div>
           {/* Header & Status Card */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-gradient-to-r from-[#0a2618] via-[#051a10] to-[#0a2618] p-5 rounded-3xl border border-[#d4af37]/40 shadow-xl">
             <div>
@@ -2555,12 +2998,19 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang }) => 
                       ? (isUr ? 'ڈیوائس سے تصویر منتخب کریں' : 'Upload Photo from Device')
                       : (isUr ? 'ویڈیو فائل اپ لوڈ کریں' : 'Upload Video File')}
                   </label>
-                  <label className="flex items-center justify-center gap-2 rounded-xl border border-dashed border-[#d4af37]/50 bg-[#051a10] p-3 text-xs font-semibold text-[#f3df88] hover:border-[#d4af37] transition-colors cursor-pointer">
-                    <Upload className="h-4 w-4" />
-                    <span>
-                      {isUploadingGalleryFile
-                        ? (isUr ? 'اپ لوڈ ہو رہا ہے...' : 'Processing file...')
-                        : (isUr ? 'فائل منتخب کریں (JPEG/PNG/MP4)' : 'Select Media File from Device')}
+                  <label className="flex flex-col items-center justify-center gap-1 rounded-xl border border-dashed border-[#d4af37]/50 bg-[#051a10] p-3 text-xs font-semibold text-[#f3df88] hover:border-[#d4af37] transition-colors cursor-pointer">
+                    <div className="flex items-center gap-2">
+                      <Upload className="h-4 w-4 text-[#d4af37]" />
+                      <span>
+                        {isUploadingGalleryFile
+                          ? (isUr ? 'اپ لوڈ ہو رہا ہے...' : 'Processing file...')
+                          : (isUr ? 'فائل منتخب کریں (Max 50MB)' : 'Select Media File (Max 50MB)')}
+                      </span>
+                    </div>
+                    <span className="text-[10px] text-[#f4efe6]/50">
+                      {newGalleryType === 'video'
+                        ? 'MP4, WebM, MOV, AVI — Smooth uploads up to 50MB'
+                        : 'JPG, PNG, WebP — High-Resolution Photos up to 50MB'}
                     </span>
                     <input
                       type="file"
@@ -2879,10 +3329,10 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang }) => 
         </div>
       )}
 
-      {/* TAB 4: DEDICATED ADMIN SOS INBOX & HELPDESK TICKETS */}
+      {/* TAB 4: DEDICATED ADMIN SOS INBOX & HELPDESK TICKETS (Requirement 2) */}
       {activeTab === 'sos_inbox' && (
         <div className="space-y-4">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-[#0a2618]/90 p-5 rounded-3xl border border-[#d4af37]/30">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-[#0a2618]/90 p-5 rounded-3xl border border-[#d4af37]/30">
             <div>
               <div className="flex items-center gap-2">
                 <LifeBuoy className="h-5 w-5 text-[#d4af37]" />
@@ -2893,14 +3343,65 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang }) => 
               <p className="text-xs text-[#f4efe6]/60 mt-1">
                 {isUr
                   ? 'صارفین کی جانب سے SOS یا ہیلپ فارم سے بھیجے گئے تمام پیغامات اور شکایات کا مرکزی ان باکس۔'
-                  : 'Central inbox for all user queries, emergency help alerts, and support tickets.'}
+                  : 'Central inbox for all user queries, emergency help alerts, and support tickets with read/unread tracking.'}
               </p>
             </div>
 
-            <div className="flex items-center gap-2">
-              <span className="rounded-full bg-[#051a10] border border-[#d4af37]/30 px-3 py-1 text-xs font-bold text-[#f3df88]">
-                {openTicketsList.length} Open Inquiries
-              </span>
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Filter Pills */}
+              <div className="flex rounded-xl bg-[#051a10] p-1 border border-[#d4af37]/30">
+                <button
+                  type="button"
+                  onClick={() => setSosFilter('all')}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    sosFilter === 'all'
+                      ? 'bg-[#d4af37] text-[#051a10] shadow'
+                      : 'text-[#f4efe6]/70 hover:text-[#f4efe6]'
+                  }`}
+                >
+                  {isUr ? 'تمام' : 'All'} ({tickets.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSosFilter('unread')}
+                  className={`flex items-center gap-1 px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    sosFilter === 'unread'
+                      ? 'bg-rose-500 text-white shadow'
+                      : 'text-[#f4efe6]/70 hover:text-[#f4efe6]'
+                  }`}
+                >
+                  <span>{isUr ? 'ان ریڈ' : 'Unread'}</span>
+                  {unreadTicketsList.length > 0 && (
+                    <span className="rounded-full bg-rose-950 px-1.5 py-0.2 text-[10px] text-rose-200">
+                      {unreadTicketsList.length}
+                    </span>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSosFilter('read')}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    sosFilter === 'read'
+                      ? 'bg-[#d4af37] text-[#051a10] shadow'
+                      : 'text-[#f4efe6]/70 hover:text-[#f4efe6]'
+                  }`}
+                >
+                  {isUr ? 'پڑھے ہوئے' : 'Read'} ({readTicketsList.length})
+                </button>
+              </div>
+
+              {/* Mark All as Read button */}
+              {unreadTicketsList.length > 0 && (
+                <button
+                  type="button"
+                  onClick={markAllSOSAsRead}
+                  className="admin-btn text-xs font-bold"
+                  title="Mark all notifications and tickets as read"
+                >
+                  <CheckCheck className="h-3.5 w-3.5 text-[#d4af37]" />
+                  <span>{isUr ? 'سب پڑھا ہوا نشان زد کریں' : 'Mark All Read'}</span>
+                </button>
+              )}
             </div>
           </div>
 
@@ -2954,14 +3455,14 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang }) => 
                   <button
                     type="button"
                     onClick={() => setSelectedTicketForReply(null)}
-                    className="rounded-xl border border-white/20 bg-white/5 px-4 py-2 text-xs font-bold text-[#f4efe6] cursor-pointer"
+                    className="admin-btn"
                   >
                     Cancel
                   </button>
                   <button
                     type="submit"
                     disabled={isReplyingTicket}
-                    className="rounded-xl bg-gradient-to-r from-[#d4af37] to-[#b38f20] px-5 py-2 text-xs font-black text-[#051a10] hover:brightness-105 active:scale-95 cursor-pointer shadow-md disabled:opacity-50"
+                    className="admin-btn-primary disabled:opacity-50"
                   >
                     {isReplyingTicket ? 'Sending...' : 'Send Reply & Resolve Ticket'}
                   </button>
@@ -2970,75 +3471,127 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang }) => 
             </div>
           )}
 
-          {tickets.length === 0 ? (
+          {filteredTickets.length === 0 ? (
             <div className="rounded-3xl border border-[#d4af37]/20 bg-[#0a2618]/60 p-8 text-center text-xs text-[#f4efe6]/50">
-              {isUr ? 'کوئی SOS الرٹ موصول نہیں ہوا۔' : 'No SOS inquiries or support tickets submitted yet.'}
+              {sosFilter === 'unread'
+                ? (isUr ? 'کوئی غیر پڑھا ہوا الرٹ نہیں ہے! تمام حل شدہ یا پڑھے جا چکے ہیں۔' : 'No unread SOS tickets! All inquiries are read or resolved.')
+                : sosFilter === 'read'
+                ? (isUr ? 'کوئی پڑھا ہوا الرٹ موجود نہیں ہے۔' : 'No read tickets found.')
+                : (isUr ? 'کوئی SOS الرٹ موصول نہیں ہوا۔' : 'No SOS inquiries or support tickets submitted yet.')}
             </div>
           ) : (
             <div className="space-y-3">
-              {tickets.map((tkt) => (
-                <div
-                  key={tkt.id}
-                  className={`rounded-3xl border p-5 shadow-xl space-y-3 transition-all ${
-                    tkt.status === 'open'
-                      ? 'border-[#d4af37]/50 bg-gradient-to-br from-[#0c311e] via-[#0a2618] to-[#051a10]'
-                      : 'border-stone-800 bg-stone-900/40 opacity-75'
-                  }`}
-                >
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-[#d4af37]/20 pb-3">
-                    <div className="space-y-0.5">
-                      <div className="flex items-center gap-2">
-                        <span className="text-base font-bold text-[#f4efe6]">{tkt.subject}</span>
-                        <span
-                          className={`rounded-full px-2.5 py-0.5 text-[10px] font-black uppercase ${
-                            tkt.status === 'open'
-                              ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40 animate-pulse'
-                              : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                          }`}
-                        >
-                          {tkt.status === 'open' ? 'Open Ticket' : 'Resolved'}
-                        </span>
+              {filteredTickets.map((tkt) => {
+                const isUnread = !tkt.read && tkt.status === 'open';
+
+                return (
+                  <div
+                    key={tkt.id}
+                    className={`rounded-3xl border p-5 shadow-xl space-y-3 transition-all ${
+                      isUnread
+                        ? 'border-[#d4af37] bg-gradient-to-br from-[#0e3522] via-[#0a2618] to-[#051a10] shadow-[#d4af37]/15 ring-1 ring-[#d4af37]/40'
+                        : tkt.status === 'open'
+                        ? 'border-[#d4af37]/40 bg-[#0a2618]/90'
+                        : 'border-stone-800 bg-stone-900/40 opacity-75'
+                    }`}
+                  >
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-[#d4af37]/20 pb-3">
+                      <div className="space-y-0.5">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-base font-bold text-[#f4efe6]">{tkt.subject}</span>
+
+                          {/* Read / Unread Status Badge */}
+                          {isUnread ? (
+                            <span className="flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[10px] font-black uppercase bg-rose-500/25 text-rose-300 border border-rose-500/50 animate-pulse">
+                              <span className="h-1.5 w-1.5 rounded-full bg-rose-400"></span>
+                              <span>{isUr ? 'نیا غیر پڑھا ہوا' : 'New Unread'}</span>
+                            </span>
+                          ) : (
+                            <span className="flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold text-emerald-400/80 bg-emerald-950/40 border border-emerald-500/20">
+                              <Check className="h-3 w-3" />
+                              <span>{isUr ? 'پڑھا ہوا' : 'Read'}</span>
+                            </span>
+                          )}
+
+                          {/* Ticket Status */}
+                          <span
+                            className={`rounded-full px-2.5 py-0.5 text-[10px] font-black uppercase ${
+                              tkt.status === 'open'
+                                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                                : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                            }`}
+                          >
+                            {tkt.status === 'open' ? (isUr ? 'کھلا ٹکٹ' : 'Open Ticket') : (isUr ? 'حل شدہ' : 'Resolved')}
+                          </span>
+                        </div>
+
+                        <p className="text-xs text-[#f4efe6]/60">
+                          From: <span className="text-[#f3df88] font-bold">{tkt.userName}</span> (ID: {tkt.userId}) • Phone: {tkt.userPhone} • Email: {tkt.userEmail}
+                        </p>
                       </div>
-                      <p className="text-xs text-[#f4efe6]/60">
-                        From: <span className="text-[#f3df88] font-bold">{tkt.userName}</span> (ID: {tkt.userId}) • Phone: {tkt.userPhone} • Email: {tkt.userEmail}
-                      </p>
-                    </div>
 
-                    <span className="text-[11px] text-[#f4efe6]/50">
-                      {new Date(tkt.createdAt).toLocaleString()}
-                    </span>
-                  </div>
-
-                  <div className="rounded-2xl bg-[#051a10]/70 p-3.5 text-xs text-[#f4efe6]/90 space-y-1">
-                    <span className="text-[10px] font-bold uppercase text-[#d4af37] block">User Message:</span>
-                    <p className="leading-relaxed">{tkt.message}</p>
-                  </div>
-
-                  {tkt.staffReply && (
-                    <div className="rounded-2xl bg-emerald-950/40 border border-emerald-500/30 p-3.5 text-xs text-emerald-200 space-y-1">
-                      <span className="text-[10px] font-bold uppercase text-emerald-400 block">
-                        Admin / Staff Resolution ({tkt.repliedAt ? new Date(tkt.repliedAt).toLocaleString() : ''}):
+                      <span className="text-[11px] text-[#f4efe6]/50">
+                        {new Date(tkt.createdAt).toLocaleString()}
                       </span>
-                      <p className="leading-relaxed">{tkt.staffReply}</p>
                     </div>
-                  )}
 
-                  {tkt.status === 'open' && (
-                    <div className="flex items-center justify-end gap-2 pt-2 border-t border-white/5">
-                      <button
-                        onClick={() => {
-                          setSelectedTicketForReply(tkt);
-                          setTicketReplyText('');
-                        }}
-                        className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-[#d4af37] to-[#b38f20] px-4 py-2 text-xs font-black text-[#051a10] hover:brightness-105 active:scale-95 cursor-pointer shadow-md shadow-[#d4af37]/20"
-                      >
-                        <MessageSquare className="h-4 w-4" />
-                        <span>{isUr ? 'جواب ارسال کریں اور حل کریں' : 'Reply & Resolve'}</span>
-                      </button>
+                    <div className="rounded-2xl bg-[#051a10]/70 p-3.5 text-xs text-[#f4efe6]/90 space-y-1">
+                      <span className="text-[10px] font-bold uppercase text-[#d4af37] block">User Message:</span>
+                      <p className="leading-relaxed">{tkt.message}</p>
                     </div>
-                  )}
-                </div>
-              ))}
+
+                    {tkt.staffReply && (
+                      <div className="rounded-2xl bg-emerald-950/40 border border-emerald-500/30 p-3.5 text-xs text-emerald-200 space-y-1">
+                        <span className="text-[10px] font-bold uppercase text-emerald-400 block">
+                          Admin / Staff Resolution ({tkt.repliedAt ? new Date(tkt.repliedAt).toLocaleString() : ''}):
+                        </span>
+                        <p className="leading-relaxed">{tkt.staffReply}</p>
+                      </div>
+                    )}
+
+                    {/* Action Bar with Sleek Admin Buttons */}
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-white/5">
+                      <div className="flex items-center gap-1.5">
+                        {isUnread ? (
+                          <button
+                            type="button"
+                            onClick={() => markSOSAsRead(tkt.id, true)}
+                            className="admin-btn text-xs"
+                            title="Mark as read in admin inbox"
+                          >
+                            <Eye className="h-3.5 w-3.5 text-[#d4af37]" />
+                            <span>{isUr ? 'پڑھا ہوا نشان زد کریں' : 'Mark as Read'}</span>
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => markSOSAsRead(tkt.id, false)}
+                            className="admin-btn text-xs text-[#f4efe6]/70"
+                            title="Mark as unread"
+                          >
+                            <EyeOff className="h-3.5 w-3.5 text-[#f4efe6]/50" />
+                            <span>{isUr ? 'غیر پڑھا ہوا کریں' : 'Mark as Unread'}</span>
+                          </button>
+                        )}
+                      </div>
+
+                      {tkt.status === 'open' && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedTicketForReply(tkt);
+                            setTicketReplyText('');
+                          }}
+                          className="admin-btn-primary text-xs"
+                        >
+                          <MessageSquare className="h-3.5 w-3.5" />
+                          <span>{isUr ? 'جواب ارسال کریں اور حل کریں' : 'Reply & Resolve'}</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>

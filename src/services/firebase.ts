@@ -42,6 +42,7 @@ import {
   PaymentSettings,
   FarmBanner,
   FarmGalleryItem,
+  FarmProfileSettings,
 } from '../types/farm';
 import {
   PACKAGE_VALIDITY_DAYS,
@@ -50,6 +51,7 @@ import {
   OFFICIAL_INFO,
   DEFAULT_BANNERS,
   DEFAULT_GALLERY_ITEMS,
+  DEFAULT_FARM_PROFILE,
   calculateReferralCommission,
   deductWithdrawalBalance,
   refundWithdrawalBalance,
@@ -344,17 +346,46 @@ export function subscribeToOrders(
 /**
  * Admin live listener: receives updates for all registered users (Users Directory)
  */
+export function cleanFakeUsers(): UserAccount[] {
+  try {
+    const raw = localStorage.getItem('pakHenUsers');
+    const users: UserAccount[] = raw ? JSON.parse(raw) : [];
+    const realUsers = users.filter(
+      (user) =>
+        user.email &&
+        !user.email.toLowerCase().includes('ai-studio-dummy') &&
+        !user.email.toLowerCase().includes('dummy') &&
+        !user.email.toLowerCase().includes('testmember99@')
+    );
+    localStorage.setItem('pakHenUsers', JSON.stringify(realUsers));
+    return realUsers;
+  } catch (e) {
+    return [];
+  }
+}
+
 export function subscribeToUsers(callback: (users: UserAccount[]) => void): Unsubscribe {
   const usersRef = collection(db, 'users');
   return onSnapshot(
     usersRef,
     (snapshot) => {
-      const users: UserAccount[] = [];
+      const rawUsers: UserAccount[] = [];
       snapshot.forEach((d) => {
-        users.push(d.data() as UserAccount);
+        rawUsers.push(d.data() as UserAccount);
       });
-      users.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-      callback(users);
+      // Requirement 3: Filter out dummy/fake studio users, keeping only real registered ones with valid emails/phones
+      const realUsers = rawUsers.filter(
+        (u) =>
+          u.email &&
+          !u.email.toLowerCase().includes('ai-studio-dummy') &&
+          !u.email.toLowerCase().includes('dummy') &&
+          !u.email.toLowerCase().includes('testmember99@')
+      );
+      realUsers.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      try {
+        localStorage.setItem('pakHenUsers', JSON.stringify(realUsers));
+      } catch (e) {}
+      callback(realUsers);
     },
     (err) => {
       console.error('Firestore users subscription error:', err);
@@ -457,9 +488,18 @@ export function subscribeToTickets(
       : query(ticketsRef, where('userId', '==', userId));
 
   return onSnapshot(q, (snapshot) => {
+    let localSOS: any[] = [];
+    try {
+      const raw = localStorage.getItem('adminSOSInbox');
+      if (raw) localSOS = JSON.parse(raw);
+    } catch (e) {}
+
     const list: SupportTicket[] = [];
     snapshot.forEach((d) => {
-      list.push(d.data() as SupportTicket);
+      const t = d.data() as SupportTicket;
+      const localMatch = localSOS.find((item) => item.id === t.id);
+      const isRead = typeof t.read === 'boolean' ? t.read : (localMatch ? !!localMatch.read : t.status === 'resolved');
+      list.push({ ...t, read: isRead });
     });
     list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     callback(list);
@@ -506,7 +546,7 @@ export const INITIAL_PAYMENT_METHODS: PaymentAccount[] = [
     title: 'JazzCash Official',
     titleUr: 'جاز کیش آفیشل',
     accountTitle: 'Pak Hen Farm Official',
-    accountNumber: '03009988776',
+    accountNumber: '980722735',
     instructions: 'Send money to JazzCash Mobile Account & enter TID below',
     instructionsUr: 'جاز کیش موبائل اکاؤنٹ پر رقم منتقل کر کے TID درج کریں',
     active: true,
@@ -545,8 +585,8 @@ export const INITIAL_PAYMENT_METHODS: PaymentAccount[] = [
     type: 'usdt',
     title: 'USDT (TRC-20)',
     titleUr: 'یو ایس ڈی ٹی (TRC20)',
-    accountTitle: 'Official TRC-20 Wallet',
-    accountNumber: 'TPaCKdX3kRtBHHMLdBmmw37uC9FmUsVPoc',
+    accountTitle: 'Pak Hen Farm Official',
+    accountNumber: 'TPACKdX3KrTBHHMLdBmmw37uC9FmUsVPoc',
     instructions: 'Send USDT on TRON (TRC20) network only',
     instructionsUr: 'صرف TRON (TRC20) نیٹ ورک پر USDT ٹرانسفر کریں',
     active: true,
@@ -668,6 +708,58 @@ export function subscribeToPaymentSettings(callback: (settings: PaymentSettings)
 export async function cloudUpdatePaymentSettings(updates: Partial<PaymentSettings>): Promise<void> {
   const settingsRef = doc(db, 'paymentSettings', 'global');
   await setDoc(settingsRef, { ...updates, updatedAt: new Date().toISOString() }, { merge: true });
+}
+
+export function subscribeToFarmProfile(callback: (profile: FarmProfileSettings) => void): Unsubscribe {
+  const profileDocRef = doc(db, 'settings', 'farm_profile');
+  return onSnapshot(
+    profileDocRef,
+    (snapshot) => {
+      if (snapshot.exists()) {
+        const data = snapshot.data() as FarmProfileSettings;
+        callback({
+          ...DEFAULT_FARM_PROFILE,
+          ...data,
+        });
+      } else {
+        const localName = localStorage.getItem('adminFarmName') || DEFAULT_FARM_PROFILE.farmName;
+        const localBio = localStorage.getItem('adminBio') || DEFAULT_FARM_PROFILE.farmBio;
+        const localLocation = localStorage.getItem('adminLocation') !== null ? (localStorage.getItem('adminLocation') || '') : DEFAULT_FARM_PROFILE.location;
+        const localHelpline = localStorage.getItem('adminHelpline') || DEFAULT_FARM_PROFILE.helpline;
+        const localAvatar = localStorage.getItem('adminAvatar') || DEFAULT_FARM_PROFILE.avatar;
+        const localCover = localStorage.getItem('adminCover') || DEFAULT_FARM_PROFILE.coverUrl;
+        callback({
+          farmName: localName,
+          farmBio: localBio,
+          location: localLocation,
+          helpline: localHelpline,
+          avatar: localAvatar,
+          coverUrl: localCover,
+          updatedAt: new Date().toISOString(),
+        });
+      }
+    },
+    (err) => {
+      console.warn('subscribeToFarmProfile fallback:', err);
+      callback(DEFAULT_FARM_PROFILE);
+    }
+  );
+}
+
+export async function cloudSaveFarmProfile(profile: FarmProfileSettings): Promise<void> {
+  const profileDocRef = doc(db, 'settings', 'farm_profile');
+  const sanitized = JSON.parse(JSON.stringify(profile));
+  await setDoc(profileDocRef, sanitized, { merge: true });
+  try {
+    localStorage.setItem('adminFarmName', profile.farmName);
+    localStorage.setItem('adminBio', profile.farmBio);
+    localStorage.setItem('adminLocation', profile.location);
+    localStorage.setItem('adminHelpline', profile.helpline);
+    localStorage.setItem('adminAvatar', profile.avatar);
+    if (profile.coverUrl) localStorage.setItem('adminCover', profile.coverUrl);
+  } catch {
+    // ignore
+  }
 }
 
 // ---------------- CLOUD SAVING (ORDERS / PACKAGES) ----------------
@@ -1239,7 +1331,44 @@ export async function cloudReplyTicket(ticketId: string, reply: string): Promise
     staffReply: reply.trim(),
     repliedAt: new Date().toISOString(),
     status: 'resolved',
+    read: true,
   });
+
+  try {
+    const raw = localStorage.getItem('adminSOSInbox');
+    let sosList: any[] = raw ? JSON.parse(raw) : [];
+    const idx = sosList.findIndex((item) => item.id === ticketId);
+    if (idx >= 0) {
+      sosList[idx].read = true;
+    } else {
+      sosList.push({ id: ticketId, read: true });
+    }
+    localStorage.setItem('adminSOSInbox', JSON.stringify(sosList));
+  } catch (e) {}
+}
+
+export async function cloudToggleTicketRead(ticketId: string, read: boolean): Promise<void> {
+  const tRef = doc(db, 'tickets', ticketId);
+  try {
+    await updateDoc(tRef, {
+      read,
+    });
+  } catch (e) {
+    console.warn('Could not update Firestore ticket read status:', e);
+  }
+
+  // Requirement 2: SOS Notification Read/Unread Toggle Logic with localStorage adminSOSInbox
+  try {
+    const raw = localStorage.getItem('adminSOSInbox');
+    let sosList: any[] = raw ? JSON.parse(raw) : [];
+    const idx = sosList.findIndex((item) => item.id === ticketId);
+    if (idx >= 0) {
+      sosList[idx].read = read;
+    } else {
+      sosList.push({ id: ticketId, read });
+    }
+    localStorage.setItem('adminSOSInbox', JSON.stringify(sosList));
+  } catch (e) {}
 }
 
 // ---------------- LIVE SHED MANAGEMENT & USER ALERTS ----------------
@@ -1927,7 +2056,14 @@ export function subscribeToGallery(callback: (items: FarmGalleryItem[]) => void)
     galleryDocRef,
     (snap) => {
       if (snap.exists() && snap.data()?.items && Array.isArray(snap.data().items)) {
-        callback(snap.data().items as FarmGalleryItem[]);
+        const rawItems = snap.data().items as FarmGalleryItem[];
+        const cleaned = rawItems.map((item) => ({
+          ...item,
+          location: item.location
+            ? item.location.replace(/,?\s*Sargodha,?\s*(Punjab)?/gi, '').replace(/\(\s*\)/g, '').trim() || 'Pak Hen Farm (Facility)'
+            : 'Pak Hen Farm (Facility)',
+        }));
+        callback(cleaned);
       } else {
         callback(DEFAULT_GALLERY_ITEMS);
       }

@@ -872,61 +872,90 @@ export const PackagesView: React.FC<PackagesViewProps> = ({ user, onOrderPlaced,
         </div>
       </div>
 
-      {/* User's Order History */}
-      {userOrders.length > 0 && (
-        <div className="rounded-3xl border border-[#d4af37]/25 bg-[#0a2618]/80 p-5 sm:p-6 shadow-xl">
-          <div className="flex items-center gap-2 mb-4">
-            <Clock className="h-4 w-4 text-[#d4af37]" />
-            <h3 className="text-base font-bold text-[#f4efe6]">
+      {/* Buy Hen & Order History Section (Scroll down to view orders) */}
+      <div className="mt-8 rounded-3xl border border-[#d4af37]/30 bg-[#0a2618]/90 p-5 sm:p-6 shadow-2xl">
+        <div className="flex items-center justify-between mb-4 pb-3 border-b border-[#d4af37]/20">
+          <div className="flex items-center gap-2">
+            <span className="text-lg">⏳</span>
+            <h3 className="text-base sm:text-lg font-black text-[#d4af37]">
               {isUr ? 'آپ کے جمع شدہ پارٹنرشپ آرڈرز' : 'Your Submitted Package Orders'}
             </h3>
           </div>
+          <span className="rounded-full bg-[#051a10] border border-[#d4af37]/30 px-3 py-1 text-xs font-bold text-[#f3df88]">
+            {userOrders.length} {isUr ? 'آرڈرز' : 'Orders'}
+          </span>
+        </div>
 
-          <div className="space-y-2.5">
-            {userOrders.map((ord) => (
-              <div
-                key={ord.id}
-                className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-2xl border border-[#d4af37]/20 bg-[#051a10]/70 p-3.5 text-xs"
-              >
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2">
-                    <span className="font-bold text-[#f3df88]">
+        {userOrders.length > 0 ? (
+          <div className="space-y-3" id="userOrdersList">
+            {userOrders.map((ord) => {
+              const isApproved = ord.status === 'approved';
+              const isRejected = ord.status === 'rejected';
+              const statusColor = isApproved ? '#28a745' : isRejected ? '#dc3545' : '#d4af37';
+              const statusText = isApproved
+                ? (isUr ? 'منظور شدہ اور فعال' : 'Approved & Active')
+                : isRejected
+                ? (isUr ? 'مسترد شدہ' : 'Rejected')
+                : (isUr ? 'زیرِ تصدیق' : 'Pending Verification');
+
+              return (
+                <div
+                  key={ord.id}
+                  className="rounded-xl border border-[#1e4d32] bg-[#112a1d] p-4 text-xs sm:text-sm shadow-md transition-all hover:border-[#d4af37]/40"
+                  style={{ borderLeft: `4px solid ${statusColor}` }}
+                >
+                  <div className="flex items-center justify-between font-bold text-[#f4efe6]">
+                    <span className="text-sm font-black text-[#f3df88]">
                       {ord.hensCount} {isUr ? 'مرغیاں' : 'Hens'} (Rs. {ord.amount.toLocaleString()})
                     </span>
-                    <span className="font-mono text-[11px] text-[#f4efe6]/50">
+                    <span
+                      className="font-black text-xs uppercase px-2 py-0.5 rounded-full"
+                      style={{
+                        color: statusColor,
+                        backgroundColor: isApproved ? 'rgba(40,167,69,0.15)' : isRejected ? 'rgba(220,53,69,0.15)' : 'rgba(212,175,55,0.15)',
+                        border: `1px solid ${statusColor}40`,
+                      }}
+                    >
+                      {statusText}
+                    </span>
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-1 text-[11px] sm:text-xs text-[#b0b0b0] mt-2 pt-2 border-t border-[#1e4d32]/60">
+                    <span className="font-mono">
                       TID: {ord.tid}
                     </span>
+                    <span>
+                      {new Date(ord.submittedAt).toLocaleString(isUr ? 'ur-PK' : 'en-US', {
+                        month: 'numeric',
+                        day: 'numeric',
+                        year: 'numeric',
+                        hour: 'numeric',
+                        minute: 'numeric',
+                        hour12: true,
+                      })}
+                    </span>
                   </div>
-                  <div className="text-[11px] text-[#f4efe6]/60">
-                    {new Date(ord.submittedAt).toLocaleString(isUr ? 'ur-PK' : 'en-US')}
-                  </div>
-                </div>
 
-                <div>
-                  {ord.status === 'pending' && (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/20 border border-amber-500/40 px-3 py-1 font-bold text-amber-300">
-                      <Clock className="h-3 w-3" />
-                      <span>{strings.statusPending}</span>
-                    </span>
-                  )}
-                  {ord.status === 'approved' && (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/20 border border-emerald-500/40 px-3 py-1 font-bold text-emerald-300">
-                      <CheckCircle2 className="h-3 w-3" />
-                      <span>{isUr ? 'منظور شدہ (فعال)' : 'Approved & Active'}</span>
-                    </span>
-                  )}
-                  {ord.status === 'rejected' && (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-rose-500/20 border border-rose-500/40 px-3 py-1 font-bold text-rose-300">
-                      <AlertCircle className="h-3 w-3" />
-                      <span>{isUr ? 'مسترد شدہ' : 'Rejected'}</span>
-                    </span>
+                  {ord.adminNote && (
+                    <div className="mt-2 text-[11px] text-[#f4efe6]/60 bg-[#051a10]/60 p-2 rounded-lg">
+                      <span className="text-[#d4af37] font-semibold">{isUr ? 'ایڈمن کا نوٹ: ' : 'Admin Note: '}</span>
+                      {ord.adminNote}
+                    </div>
                   )}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
-        </div>
-      )}
+        ) : (
+          <div className="rounded-2xl border border-dashed border-[#d4af37]/30 bg-[#051a10]/50 p-6 text-center text-xs text-[#b0b0b0]">
+            <p className="font-semibold">
+              {isUr
+                ? 'فی الحال کوئی پیکج آرڈر جمع نہیں کروایا گیا۔ نیا فلاک پیکج خریدنے پر آپ کے تمام آرڈرز یہاں ظاہر ہوں گے۔'
+                : 'No package orders submitted yet. When you buy a flock package, your pending, approved, and active orders will appear here automatically.'}
+            </p>
+          </div>
+        )}
+      </div>
     </div>
   );
 };

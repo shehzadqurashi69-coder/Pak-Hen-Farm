@@ -3,7 +3,7 @@
  * Pure functions decoupled from React UI for deterministic testing and rock-solid state management.
  */
 
-import { HenPackage, PurchasedPackage, UserAccount, FarmShed, UserAlert, ShedPerformancePoint, FarmBanner, FarmGalleryItem } from '../types/farm';
+import { HenPackage, PurchasedPackage, UserAccount, FarmShed, UserAlert, ShedPerformancePoint, FarmBanner, FarmGalleryItem, FarmProfileSettings } from '../types/farm';
 
 export const EGG_PRICE_PKR = 30; // 1 Egg = Rs. 30
 export const MIN_WITHDRAWAL_EGGS = 10; // 10 Eggs = Rs. 300
@@ -12,6 +12,17 @@ export const MAX_WITHDRAWAL_EGGS = 1000; // 1000 Eggs = Rs. 30,000
 export const MAX_WITHDRAWAL_PKR = MAX_WITHDRAWAL_EGGS * EGG_PRICE_PKR; // Rs. 30,000
 export const PACKAGE_VALIDITY_DAYS = 90;
 export const COLLECTION_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 Hours in milliseconds
+
+export const DEFAULT_FARM_PROFILE: FarmProfileSettings = {
+  farmName: 'Pak Hen Farm',
+  farmBio: 'Real Physical Poultry Farming Across Pakistan',
+  farmBioUr: 'پورے پاکستان میں حقیقی فزیکل پولٹری فارمنگ',
+  location: '', // Fully manual, blank if not set (no forced Sargodha)
+  helpline: '03105625924',
+  avatar: '/golden-hen.svg',
+  coverUrl: '/banners/banner-1.jpg',
+  updatedAt: new Date().toISOString(),
+};
 
 export const DEFAULT_GALLERY_ITEMS: FarmGalleryItem[] = [
   // 5 Real Poultry Farm Videos
@@ -25,7 +36,7 @@ export const DEFAULT_GALLERY_ITEMS: FarmGalleryItem[] = [
     mediaUrl: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4',
     thumbnailUrl: '/banners/banner-1.jpg',
     duration: '1:45',
-    location: 'Pak Hen Farm Shed-101, Sargodha, Punjab',
+    location: 'Pak Hen Farm (Shed-101 Facility)',
     uploadedAt: '2026-11-09T08:30:00Z',
     likesCount: 142,
     viewsCount: 1840,
@@ -236,10 +247,11 @@ export const OFFICIAL_INFO = {
   taglineUr: 'پورے پاکستان میں حقیقی فزیکل پولٹری فارمنگ',
   trustBadge: 'Pak Hen Farm is a 100% real physical poultry farm providing services all over Pakistan.',
   trustBadgeUrdu: 'پاک ہین فارم ایک 100% حقیقی فزیکل پولٹری فارم ہے جو پورے پاکستان میں اپنی خدمات فراہم کر رہا ہے۔',
-  usdtTrc20Address: 'TPaCKdX3kRtBHHMLdBmmw37uC9FmUsVPoc',
+  usdtTrc20Address: 'TPACKdX3KrTBHHMLdBmmw37uC9FmUsVPoc',
   usdtNetwork: 'USDT (TRC20)',
   jazzCashAccountTitle: 'Pak Hen Farm Official',
-  jazzCashAccountNumber: '03009988776',
+  jazzCashAccountNumber: '980722735',
+  helpline: '03105625924',
   adminEmail: 'shehzadqurashi69@gmail.com',
   adminEmails: ['shehzadqurashi69@gmail.com', 'shehzadqurashi9@gmail.com', 'admin@pakhenfarm.com'],
   staffEmail: 'staff@pakhenfarm.com',

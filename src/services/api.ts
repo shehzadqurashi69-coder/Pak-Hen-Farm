@@ -67,6 +67,10 @@ import {
   cloudDeleteGalleryItem,
   cloudToggleGalleryItemActive,
   cloudLikeGalleryItem,
+  subscribeToFarmProfile,
+  cloudSaveFarmProfile,
+  cleanFakeUsers,
+  cloudToggleTicketRead,
   INITIAL_PAYMENT_METHODS,
   db,
 } from './firebase';
@@ -86,6 +90,9 @@ export {
   subscribeToPaymentSettings,
   subscribeToBanners,
   subscribeToGallery,
+  subscribeToFarmProfile,
+  cleanFakeUsers,
+  cloudToggleTicketRead,
   cloudApplyShedMortality,
   cloudUpdateShedCracking,
   cloudDeclareShedSickness,
@@ -100,6 +107,7 @@ export {
   cloudDeleteGalleryItem,
   cloudToggleGalleryItemActive,
   cloudLikeGalleryItem,
+  cloudSaveFarmProfile,
   INITIAL_PAYMENT_METHODS,
 };
 
