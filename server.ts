@@ -38,9 +38,10 @@ async function startServer() {
   const app = express();
   const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
-  // 1. Increase file upload limit to 50MB for media and gallery uploads (photos & videos)
-  app.use(express.json({ limit: '50mb' }));
-  app.use(express.urlencoded({ limit: '50mb', extended: true }));
+  // Raise JSON/urlencoded body caps to 75MB so 50MB files encoded as base64 (~67MB)
+  // can still reach handleMediaUpload cleanly, while strictly enforcing 50MB decoded binary size.
+  app.use(express.json({ limit: '75mb' }));
+  app.use(express.urlencoded({ limit: '75mb', extended: true }));
 
   // Static uploads directory serving
   const UPLOAD_DIR = path.resolve(__dirname, 'public', 'uploads');
@@ -50,8 +51,132 @@ async function startServer() {
   app.use('/uploads', express.static(UPLOAD_DIR));
 
   // ---------------- MEDIA & GALLERY UPLOADS API (50MB Limit) ----------------
-  const MAX_UPLOAD_SIZE = 50 * 1024 * 1024; // 50MB limit
+  const MAX_UPLOAD_SIZE = 50 * 1024 * 1024; // 50MB binary limit
 
+  const sanitizeFolder = (rawFolder?: string): string => {
+    const clean = (rawFolder || 'gallery').replace(/[^a-zA-Z0-9_-]/g, '');
+    return clean || 'gallery';
+  };
+
+  const resolveMediaExtension = (fileName: string, detectedType: string): string => {
+    if (fileName && path.extname(fileName)) {
+      return path.extname(fileName).toLowerCase();
+    }
+    const mime = (detectedType || '').toLowerCase();
+    if (mime.includes('mp4')) return '.mp4';
+    if (mime.includes('webm')) return '.webm';
+    if (mime.includes('quicktime') || mime.includes('mov')) return '.mov';
+    if (mime.includes('x-msvideo') || mime.includes('avi')) return '.avi';
+    if (mime.includes('matroska') || mime.includes('mkv')) return '.mkv';
+    if (mime.includes('png')) return '.png';
+    if (mime.includes('jpeg') || mime.includes('jpg')) return '.jpg';
+    if (mime.includes('webp')) return '.webp';
+    if (mime.includes('gif')) return '.gif';
+    return '.bin';
+  };
+
+  const buildUniqueMediaPath = (fileName: string, detectedType: string, folder: string) => {
+    const ext = resolveMediaExtension(fileName, detectedType);
+    const safeBaseName = (fileName ? path.basename(fileName, ext) : 'media')
+      .replace(/[^a-zA-Z0-9_-]/g, '_')
+      .substring(0, 30);
+    const uniqueName = `${safeBaseName || 'media'}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}${ext}`;
+    const safeFolder = sanitizeFolder(folder);
+    const targetDir = path.join(UPLOAD_DIR, safeFolder);
+    if (!fs.existsSync(targetDir)) {
+      fs.mkdirSync(targetDir, { recursive: true });
+    }
+    return {
+      uniqueName,
+      filePath: path.join(targetDir, uniqueName),
+      relativeUrl: `/uploads/${safeFolder}/${uniqueName}`,
+    };
+  };
+
+  // Direct binary streaming endpoint (zero base64 overhead, avoids 413 & RAM spikes)
+  const handleRawBinaryUpload = (req: express.Request, res: express.Response) => {
+    const contentLengthHeader = req.headers['content-length'];
+    if (contentLengthHeader) {
+      const contentLength = parseInt(contentLengthHeader, 10);
+      if (!Number.isNaN(contentLength) && contentLength > MAX_UPLOAD_SIZE) {
+        return res.status(413).json({
+          error: 'Video or photo size is too large. Please upload media under 50MB.',
+        });
+      }
+    }
+
+    const rawFileNameHeader = req.headers['x-file-name'] as string | undefined;
+    const fileName = rawFileNameHeader ? decodeURIComponent(rawFileNameHeader) : 'media.mp4';
+    const detectedType = (req.headers['x-file-type'] as string) || (req.headers['content-type'] as string) || '';
+    const folder = (req.headers['x-folder'] as string) || 'gallery';
+
+    const { uniqueName, filePath, relativeUrl } = buildUniqueMediaPath(fileName, detectedType, folder);
+    const writeStream = fs.createWriteStream(filePath);
+    let receivedBytes = 0;
+    let aborted = false;
+
+    const cleanupOnAbort = () => {
+      writeStream.destroy();
+      fs.promises.unlink(filePath).catch(() => {});
+    };
+
+    req.on('data', (chunk: Buffer) => {
+      if (aborted) return;
+      receivedBytes += chunk.length;
+      if (receivedBytes > MAX_UPLOAD_SIZE) {
+        aborted = true;
+        cleanupOnAbort();
+        req.pause();
+        if (!res.headersSent) {
+          res.status(413).json({
+            error: 'Video or photo size is too large. Please upload media under 50MB.',
+          });
+        }
+        return;
+      }
+      if (!writeStream.write(chunk)) {
+        req.pause();
+        writeStream.once('drain', () => {
+          if (!aborted) req.resume();
+        });
+      }
+    });
+
+    req.on('end', () => {
+      if (aborted) return;
+      if (receivedBytes === 0) {
+        cleanupOnAbort();
+        if (!res.headersSent) {
+          res.status(400).json({ error: 'Empty media file received. Please select a valid video or photo.' });
+        }
+        return;
+      }
+      writeStream.end(() => {
+        if (!res.headersSent) {
+          res.status(200).json({
+            success: true,
+            url: relativeUrl,
+            fileName: uniqueName,
+            size: receivedBytes,
+            type: detectedType,
+            message: 'File streamed and uploaded successfully within 50MB limit',
+          });
+        }
+      });
+    });
+
+    req.on('error', (err) => {
+      if (aborted) return;
+      aborted = true;
+      cleanupOnAbort();
+      console.error('Stream upload error:', err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: err.message || 'Failed to upload media stream' });
+      }
+    });
+  };
+
+  // JSON / Base64 fallback handler with strict 50MB decoded size check
   const handleMediaUpload = async (req: express.Request, res: express.Response) => {
     try {
       const { file, fileName, fileType, folder } = req.body;
@@ -76,46 +201,17 @@ async function startServer() {
       }
 
       const buffer = Buffer.from(base64Data, 'base64');
+      if (buffer.length === 0) {
+        return res.status(400).json({ error: 'Empty or invalid media payload.' });
+      }
       if (buffer.length > MAX_UPLOAD_SIZE) {
         return res.status(413).json({
           error: 'Video or photo size is too large. Please upload media under 50MB.',
         });
       }
 
-      // Determine file extension
-      let ext = '';
-      if (fileName && path.extname(fileName)) {
-        ext = path.extname(fileName).toLowerCase();
-      } else if (detectedType.includes('mp4')) {
-        ext = '.mp4';
-      } else if (detectedType.includes('webm')) {
-        ext = '.webm';
-      } else if (detectedType.includes('quicktime') || detectedType.includes('mov')) {
-        ext = '.mov';
-      } else if (detectedType.includes('png')) {
-        ext = '.png';
-      } else if (detectedType.includes('jpeg') || detectedType.includes('jpg')) {
-        ext = '.jpg';
-      } else if (detectedType.includes('webp')) {
-        ext = '.webp';
-      } else {
-        ext = '.bin';
-      }
-
-      const safeBaseName = (fileName ? path.basename(fileName, ext) : 'media')
-        .replace(/[^a-zA-Z0-9_-]/g, '_')
-        .substring(0, 30);
-      const uniqueName = `${safeBaseName}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}${ext}`;
-
-      const targetDir = folder ? path.join(UPLOAD_DIR, folder) : UPLOAD_DIR;
-      if (!fs.existsSync(targetDir)) {
-        fs.mkdirSync(targetDir, { recursive: true });
-      }
-
-      const filePath = path.join(targetDir, uniqueName);
+      const { uniqueName, filePath, relativeUrl } = buildUniqueMediaPath(fileName || '', detectedType, folder || 'gallery');
       await fs.promises.writeFile(filePath, buffer);
-
-      const relativeUrl = folder ? `/uploads/${folder}/${uniqueName}` : `/uploads/${uniqueName}`;
 
       return res.status(200).json({
         success: true,
@@ -131,8 +227,20 @@ async function startServer() {
     }
   };
 
+  app.post('/api/upload-raw', handleRawBinaryUpload);
+  app.post('/api/gallery/upload-raw', handleRawBinaryUpload);
   app.post('/api/upload', handleMediaUpload);
   app.post('/api/gallery/upload', handleMediaUpload);
+
+  // Return clean JSON error if Express body parser hits entity.too.large
+  app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (err && (err.type === 'entity.too.large' || err.status === 413)) {
+      return res.status(413).json({
+        error: 'Video or photo payload exceeds the maximum allowed upload size (50MB).',
+      });
+    }
+    next(err);
+  });
 
   // ---------------- AUTH API ----------------
 

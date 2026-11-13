@@ -314,7 +314,14 @@ export default function App() {
             )}
 
             {activeScreen === 'invite' && (
-              <InviteView user={currentUser} lang={lang} />
+              <InviteView
+                user={currentUser}
+                lang={lang}
+                onUserUpdated={(updatedUser) => {
+                  setCurrentUserState(updatedUser);
+                  setCurrentUser(updatedUser);
+                }}
+              />
             )}
 
             {activeScreen === 'help' && (

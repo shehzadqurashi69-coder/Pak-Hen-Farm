@@ -70,11 +70,13 @@ import {
   subscribeToFarmProfile,
   cloudSaveFarmProfile,
   cleanFakeUsers,
+  cloudClaimReferralMilestone,
   cloudToggleTicketRead,
   INITIAL_PAYMENT_METHODS,
   db,
 } from './firebase';
 import { collection, getDocs, doc, getDoc } from 'firebase/firestore';
+import { validateMediaUploadFile } from '../utils/farmRules';
 
 export {
   subscribeToOrders,
@@ -379,7 +381,7 @@ export async function apiSubmitMedicalPaymentTid(params: {
   hensCount: number;
   perHenRate: number;
   amount: number;
-  paymentMethod: 'wallet' | 'jazzcash' | 'usdt';
+  paymentMethod: 'wallet' | PaymentMethodType;
   tid: string;
   senderName?: string;
   senderNumber?: string;
@@ -424,42 +426,62 @@ export async function apiUpdateUserProfile(
 }
 
 /**
- * Uploads media files (photos, videos) up to 50MB to the backend server storage
+ * Uploads media files (photos, videos) up to 50MB to the backend server storage.
+ * Uses direct binary streaming (/api/upload-raw) for native File objects to avoid
+ * the ~33% base64 JSON payload expansion and 413 Payload Too Large errors on videos.
  */
 export async function apiUploadMedia(
-  file: File | { dataUrl: string; fileName: string; fileType?: string; folder?: string }
+  file: File | { dataUrl: string; fileName: string; fileType?: string; folder?: string },
+  folder: string = 'gallery',
+  expectedType?: 'photo' | 'video'
 ): Promise<{ success: boolean; url: string; size: number; fileName: string }> {
-  let fileDataUrl: string;
-  let fileName: string;
-  let fileType = '';
-  let folder = 'gallery';
-
   if (file instanceof File) {
-    fileName = file.name;
-    fileType = file.type;
-    fileDataUrl = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result as string);
-      reader.onerror = (err) => reject(err);
-      reader.readAsDataURL(file);
+    const inferredKind: 'photo' | 'video' | undefined =
+      expectedType ||
+      (file.type.startsWith('video/')
+        ? 'video'
+        : file.type.startsWith('image/')
+        ? 'photo'
+        : undefined);
+
+    const validation = validateMediaUploadFile(
+      { name: file.name, type: file.type, size: file.size },
+      inferredKind
+    );
+    if (!validation.valid) {
+      throw new Error(validation.error || 'Invalid media file.');
+    }
+
+    const response = await fetch('/api/upload-raw', {
+      method: 'POST',
+      headers: {
+        'Content-Type': file.type || 'application/octet-stream',
+        'x-file-name': encodeURIComponent(file.name),
+        'x-file-type': file.type || '',
+        'x-folder': folder,
+      },
+      body: file,
     });
-  } else {
-    fileDataUrl = file.dataUrl;
-    fileName = file.fileName;
-    fileType = file.fileType || '';
-    if (file.folder) folder = file.folder;
+
+    if (!response.ok) {
+      const errorJson = await response.json().catch(() => ({}));
+      throw new Error(errorJson.error || `Upload failed with status ${response.status}`);
+    }
+
+    return await response.json();
   }
 
+  const targetFolder = file.folder || folder;
   const response = await fetch('/api/upload', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      file: fileDataUrl,
-      fileName,
-      fileType,
-      folder,
+      file: file.dataUrl,
+      fileName: file.fileName,
+      fileType: file.fileType || '',
+      folder: targetFolder,
     }),
   });
 
@@ -470,4 +492,12 @@ export async function apiUploadMedia(
 
   return await response.json();
 }
+
+export async function apiClaimReferralMilestone(
+  userId: string,
+  targetId?: string
+): Promise<{ updatedUser: UserAccount; creditedAmount: number; claimedIds: string[] }> {
+  return await cloudClaimReferralMilestone(userId, targetId);
+}
+
 

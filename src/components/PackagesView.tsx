@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { UserAccount, HenPackage, HenOrder, PaymentAccount, PaymentSettings } from '../types/farm';
-import { PACKAGES, OFFICIAL_INFO, calculatePackagePrice, isUserLocked } from '../utils/farmRules';
+import { PACKAGES, calculatePackagePrice, isUserLocked, filterActivePaymentMethods } from '../utils/farmRules';
 import { apiCreateOrder, subscribeToOrders, subscribeToPaymentMethods, subscribeToPaymentSettings } from '../services/api';
 import { PaymentLogo } from './PaymentLogos';
 import { t } from '../utils/translations';
@@ -75,16 +75,15 @@ export const PackagesView: React.FC<PackagesViewProps> = ({ user, onOrderPlaced,
       setUserOrders(ords);
     });
 
-    // Live subscription to dynamic payment accounts set by Admin
+    // Live subscription to dynamic payment accounts set by Admin (strictly active only)
     const unsubPm = subscribeToPaymentMethods((methods) => {
-      const activeMethods = methods.filter((m) => m.active);
+      const activeMethods = filterActivePaymentMethods(methods);
       setPaymentMethods(activeMethods);
-      if (activeMethods.length > 0) {
-        setSelectedMethodId((prev) => {
-          if (prev && activeMethods.some((m) => m.id === prev)) return prev;
-          return activeMethods[0].id;
-        });
-      }
+      setSelectedMethodId((prev) => {
+        if (activeMethods.length === 0) return '';
+        if (prev && activeMethods.some((m) => m.id === prev)) return prev;
+        return activeMethods[0].id;
+      });
     });
 
     // Live subscription to payment settings (Custom Admin Greeting)
@@ -99,7 +98,7 @@ export const PackagesView: React.FC<PackagesViewProps> = ({ user, onOrderPlaced,
     };
   }, [user.id]);
 
-  const activeMethod = paymentMethods.find((m) => m.id === selectedMethodId) || paymentMethods[0];
+  const activeMethod = paymentMethods.find((m) => m.id === selectedMethodId) || paymentMethods[0] || null;
 
   const handleCopyAccount = (textToCopy: string) => {
     navigator.clipboard.writeText(textToCopy);
@@ -158,6 +157,15 @@ export const PackagesView: React.FC<PackagesViewProps> = ({ user, onOrderPlaced,
       return;
     }
 
+    if (!activeMethod || paymentMethods.length === 0) {
+      setErrorMsg(
+        isUr
+          ? 'اس وقت کوئی فعال ادائیگی اکاؤنٹ دستیاب نہیں ہے۔ براہ کرم ایڈمن سے رابطہ کریں۔'
+          : 'No active payment account is currently enabled. Please contact Admin before submitting a deposit.'
+      );
+      return;
+    }
+
     const cleanTid = tid.trim();
     const cleanTitle = senderTitle.trim();
     const cleanNumber = senderNumber.trim();
@@ -187,11 +195,11 @@ export const PackagesView: React.FC<PackagesViewProps> = ({ user, onOrderPlaced,
         packageId: `partner-flock-${quantity}-hens`,
         hensCount: quantity,
         amount: calculatedTotal,
-        senderEasypaisaNumber: cleanNumber || user.phone || activeMethod?.accountNumber || 'Official Deposit',
-        senderEasypaisaTitle: cleanTitle || user.fullName || activeMethod?.title || 'User Deposit',
+        senderEasypaisaNumber: cleanNumber || user.phone || '',
+        senderEasypaisaTitle: cleanTitle || user.fullName || '',
         tid: cleanTid,
-        paymentMethodId: activeMethod?.id,
-        paymentMethodTitle: activeMethod?.title,
+        paymentMethodId: activeMethod.id,
+        paymentMethodTitle: activeMethod.title,
         proofSlipUrl: proofSlipBase64,
       });
 
@@ -454,123 +462,137 @@ export const PackagesView: React.FC<PackagesViewProps> = ({ user, onOrderPlaced,
             </button>
           </div>
 
-          {/* Dynamic Payment Method Tabs (Admin Controlled Accounts) */}
-          {paymentMethods.length > 0 && (
-            <div className="space-y-2">
-              <label className="block text-xs font-bold text-[#f3df88] uppercase tracking-wider">
-                {isUr ? 'طریقہ ادائیگی منتخب کریں:' : 'Select Payment Method:'}
-              </label>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                {paymentMethods.map((pm) => {
-                  const isSelected = (activeMethod?.id || paymentMethods[0]?.id) === pm.id;
-                  return (
-                    <button
-                      key={pm.id}
-                      type="button"
-                      onClick={() => {
-                        setSelectedMethodId(pm.id);
-                        setErrorMsg('');
-                      }}
-                      className={`flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl border text-xs font-bold transition-all cursor-pointer ${
-                        isSelected
-                          ? 'border-[#f3df88] bg-gradient-to-r from-[#d4af37] to-[#b38f20] text-[#051a10] shadow-md shadow-[#d4af37]/30 ring-2 ring-[#f3df88]'
-                          : 'border-[#d4af37]/30 bg-[#051a10]/70 text-[#f4efe6] hover:border-[#d4af37]/70 hover:bg-[#0a2618]'
-                      }`}
-                    >
-                      <PaymentLogo method={pm.type} size="sm" />
-                      <span className="truncate">{isUr && pm.titleUr ? pm.titleUr : pm.title}</span>
-                    </button>
-                  );
-                })}
+          {/* Dynamic Payment Method Tabs (Strictly Admin-Enabled Accounts) */}
+          {paymentMethods.length > 0 && activeMethod ? (
+            <>
+              <div className="space-y-2">
+                <label className="block text-xs font-bold text-[#f3df88] uppercase tracking-wider">
+                  {isUr ? 'طریقہ ادائیگی منتخب کریں:' : 'Select Payment Method:'}
+                </label>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {paymentMethods.map((pm) => {
+                    const isSelected = activeMethod.id === pm.id;
+                    return (
+                      <button
+                        key={pm.id}
+                        type="button"
+                        onClick={() => {
+                          setSelectedMethodId(pm.id);
+                          setErrorMsg('');
+                        }}
+                        className={`flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl border text-xs font-bold transition-all cursor-pointer ${
+                          isSelected
+                            ? 'border-[#f3df88] bg-gradient-to-r from-[#d4af37] to-[#b38f20] text-[#051a10] shadow-md shadow-[#d4af37]/30 ring-2 ring-[#f3df88]'
+                            : 'border-[#d4af37]/30 bg-[#051a10]/70 text-[#f4efe6] hover:border-[#d4af37]/70 hover:bg-[#0a2618]'
+                        }`}
+                      >
+                        <PaymentLogo method={pm.type} size="sm" />
+                        <span className="truncate">{isUr && pm.titleUr ? pm.titleUr : pm.title}</span>
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
+
+              {/* Active Payment Account Details Card (Strictly from Firestore active record) */}
+              <div className="rounded-2xl border border-[#d4af37]/50 bg-[#051a10] p-4 sm:p-5 space-y-4">
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-b border-[#d4af37]/20 pb-3">
+                  <div>
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-[#d4af37]/90 block">
+                      {isUr ? 'سرکاری فارم اکاؤنٹ' : 'Official Farm Payment Account'}
+                    </span>
+                    <h4 className="text-base font-bold text-[#f3df88]">
+                      {isUr && activeMethod.titleUr ? activeMethod.titleUr : activeMethod.title}
+                    </h4>
+                    {activeMethod.bankName && (
+                      <p className="text-xs text-[#f4efe6]/70">{activeMethod.bankName}</p>
+                    )}
+                  </div>
+
+                  <div className="text-right sm:text-right">
+                    <span className="text-[10px] uppercase text-[#f4efe6]/60 block">
+                      {isUr ? 'مطلوبہ رقم' : 'Amount to Pay'}
+                    </span>
+                    <span className="text-lg font-black text-[#d4af37]">
+                      PKR {calculatedTotal.toLocaleString()}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Account Details & Copy Box */}
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl bg-[#0a2618] p-3.5 border border-[#d4af37]/30">
+                  <div className="space-y-1 overflow-hidden">
+                    <div className="text-[11px] text-[#f4efe6]/70">
+                      <span className="text-[#f3df88] font-semibold">{isUr ? 'اکاؤنٹ کا عنوان:' : 'Account Title:'} </span>
+                      <span className="font-bold text-[#f4efe6]">{activeMethod.accountTitle}</span>
+                    </div>
+                    <div className="text-xs sm:text-sm font-mono font-bold text-[#f4efe6] select-all break-all">
+                      <span className="text-[#f3df88]/80 text-xs font-sans mr-1">{isUr ? 'نمبر:' : 'Number / Address:'}</span>
+                      {activeMethod.accountNumber}
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => handleCopyAccount(activeMethod.accountNumber)}
+                    className="flex items-center justify-center gap-1.5 rounded-xl bg-gradient-to-r from-[#d4af37] via-[#f3df88] to-[#d4af37] px-4 py-2.5 text-xs font-bold text-[#051a10] hover:brightness-105 transition-all cursor-pointer active:scale-95 shrink-0 shadow-md shadow-[#d4af37]/20"
+                  >
+                    {copiedNumber ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                    <span>{copiedNumber ? (isUr ? 'کاپی ہو گیا' : 'Copied!') : (isUr ? 'کاپی کریں' : 'Copy Number')}</span>
+                  </button>
+                </div>
+
+                {/* Admin Uploaded QR Code Display (if present) */}
+                {activeMethod.qrCodeUrl && (
+                  <div className="flex flex-col sm:flex-row items-center gap-4 rounded-xl bg-[#0a2618]/70 border border-[#d4af37]/30 p-3.5">
+                    <div
+                      onClick={() => setZoomImageUrl(activeMethod.qrCodeUrl || null)}
+                      className="relative group cursor-pointer shrink-0 rounded-xl overflow-hidden border-2 border-[#d4af37] p-1 bg-white shadow-md"
+                    >
+                      <img
+                        src={activeMethod.qrCodeUrl}
+                        alt="Payment QR Code"
+                        className="h-28 w-28 object-contain"
+                      />
+                      <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white">
+                        <ZoomIn className="h-6 w-6" />
+                      </div>
+                    </div>
+                    <div className="space-y-1 text-center sm:text-left">
+                      <div className="inline-flex items-center gap-1.5 text-xs font-bold text-[#f3df88]">
+                        <QrCode className="h-4 w-4 text-[#d4af37]" />
+                        <span>{isUr ? 'آفیشل کیو آر کوڈ (Scan & Pay)' : 'Official QR Code (Scan to Pay)'}</span>
+                      </div>
+                      <p className="text-[11px] text-[#f4efe6]/80 leading-relaxed">
+                        {isUr
+                          ? 'اپنے موبائل ایپ سے اس کیو آر کوڈ کو اسکین کریں اور درست رقم منتقل کریں۔ کلک کر کے بڑا دیکھیں۔'
+                          : 'Scan this QR code from your banking/wallet app to pay instantly. Click image to zoom.'}
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Instructions */}
+                <div className="text-[11px] text-[#f4efe6]/70 leading-relaxed bg-[#0a2618]/60 p-2.5 rounded-xl border border-[#d4af37]/15">
+                  {isUr
+                    ? activeMethod.instructionsUr || `رقم (PKR ${calculatedTotal.toLocaleString()}) اوپر دیے گئے اکاؤنٹ پر منتقل کریں۔ ٹرانسفر مکمل ہونے کے بعد رسید / اسکرین شاٹ اپ لوڈ کریں اور TID درج کریں۔`
+                    : activeMethod.instructions || `Transfer PKR ${calculatedTotal.toLocaleString()} to the account above. After payment, upload your receipt screenshot and enter your TID below.`}
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="rounded-2xl border border-amber-500/50 bg-amber-950/50 p-5 text-center space-y-2">
+              <AlertCircle className="h-8 w-8 text-amber-400 mx-auto" />
+              <h4 className="text-sm font-extrabold text-[#f3df88]">
+                {isUr ? 'ادائیگی کا کوئی فعال اکاؤنٹ دستیاب نہیں ہے' : 'No Active Payment Accounts Currently Available'}
+              </h4>
+              <p className="text-xs text-[#f4efe6]/75 max-w-md mx-auto">
+                {isUr
+                  ? 'ایڈمن نے اس وقت تمام ڈپازٹ اکاؤنٹس عارضی طور پر بند کیے ہوئے ہیں۔ براہ کرم تھوڑی دیر بعد کوشش کریں یا ہیلپ لائن سے رابطہ کریں۔'
+                  : 'Deposits are temporarily paused because no payment accounts are currently enabled by the Farm Administrator. Please check back shortly or contact Farm Support.'}
+              </p>
             </div>
           )}
-
-          {/* Active Payment Account Details Card */}
-          <div className="rounded-2xl border border-[#d4af37]/50 bg-[#051a10] p-4 sm:p-5 space-y-4">
-            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-b border-[#d4af37]/20 pb-3">
-              <div>
-                <span className="text-[10px] font-bold uppercase tracking-wider text-[#d4af37]/90 block">
-                  {isUr ? 'سرکاری فارم اکاؤنٹ' : 'Official Farm Payment Account'}
-                </span>
-                <h4 className="text-base font-bold text-[#f3df88]">
-                  {activeMethod?.title || 'Official Account'}
-                </h4>
-                {activeMethod?.bankName && (
-                  <p className="text-xs text-[#f4efe6]/70">{activeMethod.bankName}</p>
-                )}
-              </div>
-
-              <div className="text-right sm:text-right">
-                <span className="text-[10px] uppercase text-[#f4efe6]/60 block">
-                  {isUr ? 'مطلوبہ رقم' : 'Amount to Pay'}
-                </span>
-                <span className="text-lg font-black text-[#d4af37]">
-                  PKR {calculatedTotal.toLocaleString()}
-                </span>
-              </div>
-            </div>
-
-            {/* Account Details & Copy Box */}
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl bg-[#0a2618] p-3.5 border border-[#d4af37]/30">
-              <div className="space-y-1 overflow-hidden">
-                <div className="text-[11px] text-[#f4efe6]/70">
-                  <span className="text-[#f3df88] font-semibold">{isUr ? 'اکاؤنٹ کا عنوان:' : 'Account Title:'} </span>
-                  <span className="font-bold text-[#f4efe6]">{activeMethod?.accountTitle || 'Pak Hen Farm Official'}</span>
-                </div>
-                <div className="text-xs sm:text-sm font-mono font-bold text-[#f4efe6] select-all break-all">
-                  <span className="text-[#f3df88]/80 text-xs font-sans mr-1">{isUr ? 'نمبر:' : 'Number / Address:'}</span>
-                  {activeMethod?.accountNumber || OFFICIAL_INFO.usdtTrc20Address}
-                </div>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => handleCopyAccount(activeMethod?.accountNumber || OFFICIAL_INFO.usdtTrc20Address)}
-                className="flex items-center justify-center gap-1.5 rounded-xl bg-gradient-to-r from-[#d4af37] via-[#f3df88] to-[#d4af37] px-4 py-2.5 text-xs font-bold text-[#051a10] hover:brightness-105 transition-all cursor-pointer active:scale-95 shrink-0 shadow-md shadow-[#d4af37]/20"
-              >
-                {copiedNumber ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-                <span>{copiedNumber ? (isUr ? 'کاپی ہو گیا' : 'Copied!') : (isUr ? 'کاپی کریں' : 'Copy Number')}</span>
-              </button>
-            </div>
-
-            {/* Admin Uploaded QR Code Display (if present) */}
-            {activeMethod?.qrCodeUrl && (
-              <div className="flex flex-col sm:flex-row items-center gap-4 rounded-xl bg-[#0a2618]/70 border border-[#d4af37]/30 p-3.5">
-                <div
-                  onClick={() => setZoomImageUrl(activeMethod.qrCodeUrl || null)}
-                  className="relative group cursor-pointer shrink-0 rounded-xl overflow-hidden border-2 border-[#d4af37] p-1 bg-white shadow-md"
-                >
-                  <img
-                    src={activeMethod.qrCodeUrl}
-                    alt="Payment QR Code"
-                    className="h-28 w-28 object-contain"
-                  />
-                  <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white">
-                    <ZoomIn className="h-6 w-6" />
-                  </div>
-                </div>
-                <div className="space-y-1 text-center sm:text-left">
-                  <div className="inline-flex items-center gap-1.5 text-xs font-bold text-[#f3df88]">
-                    <QrCode className="h-4 w-4 text-[#d4af37]" />
-                    <span>{isUr ? 'آفیشل کیو آر کوڈ (Scan & Pay)' : 'Official QR Code (Scan to Pay)'}</span>
-                  </div>
-                  <p className="text-[11px] text-[#f4efe6]/80 leading-relaxed">
-                    {isUr
-                      ? 'اپنے موبائل ایپ سے اس کیو آر کوڈ کو اسکین کریں اور درست رقم منتقل کریں۔ کلک کر کے بڑا دیکھیں۔'
-                      : 'Scan this QR code from your banking/wallet app to pay instantly. Click image to zoom.'}
-                  </p>
-                </div>
-              </div>
-            )}
-
-            {/* Instructions */}
-            <div className="text-[11px] text-[#f4efe6]/70 leading-relaxed bg-[#0a2618]/60 p-2.5 rounded-xl border border-[#d4af37]/15">
-              {isUr
-                ? activeMethod?.instructionsUr || `رقم (PKR ${calculatedTotal.toLocaleString()}) اوپر دیے گئے اکاؤنٹ پر منتقل کریں۔ ٹرانسفر مکمل ہونے کے بعد رسید / اسکرین شاٹ اپ لوڈ کریں اور TID درج کریں۔`
-                : activeMethod?.instructions || `Transfer PKR ${calculatedTotal.toLocaleString()} to the account above. After payment, upload your receipt screenshot and enter your TID below.`}
-            </div>
-          </div>
 
           {/* Error & Success notifications */}
           {errorMsg && (
@@ -708,9 +730,11 @@ export const PackagesView: React.FC<PackagesViewProps> = ({ user, onOrderPlaced,
 
             <button
               type="submit"
-              disabled={isSubmitting}
+              disabled={isSubmitting || paymentMethods.length === 0 || !activeMethod}
               className={`w-full flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-[#d4af37] via-[#f3df88] to-[#d4af37] py-3.5 text-sm font-black text-[#051a10] shadow-xl shadow-[#d4af37]/30 transition-all ${
-                isSubmitting ? 'opacity-60 cursor-not-allowed scale-98' : 'hover:brightness-105 active:scale-98 cursor-pointer'
+                isSubmitting || paymentMethods.length === 0 || !activeMethod
+                  ? 'opacity-50 cursor-not-allowed scale-98'
+                  : 'hover:brightness-105 active:scale-98 cursor-pointer'
               }`}
             >
               {isSubmitting ? (

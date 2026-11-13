@@ -58,7 +58,16 @@ import {
   cleanFakeUsers,
   apiUploadMedia,
 } from '../services/api';
-import { INITIAL_SHEDS, SHED_CAPACITY, MEDICAL_FEE_PKR, calculateShedDynamicSum, DEFAULT_BANNERS, DEFAULT_GALLERY_ITEMS, DEFAULT_FARM_PROFILE } from '../utils/farmRules';
+import {
+  INITIAL_SHEDS,
+  SHED_CAPACITY,
+  MEDICAL_FEE_PKR,
+  calculateShedDynamicSum,
+  DEFAULT_BANNERS,
+  DEFAULT_GALLERY_ITEMS,
+  DEFAULT_FARM_PROFILE,
+  validateMediaUploadFile,
+} from '../utils/farmRules';
 import { t } from '../utils/translations';
 import {
   ShieldCheck,
@@ -508,13 +517,13 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
     }
     setEditingPmId(null);
     setPmType('jazzcash');
-    setPmTitle('JazzCash Merchant');
-    setPmTitleUr('جاز کیش مرچنٹ');
-    setPmAccountTitle('Pak Hen Farm Official');
+    setPmTitle('');
+    setPmTitleUr('');
+    setPmAccountTitle('');
     setPmAccountNumber('');
     setPmBankName('');
-    setPmInstructions('Transfer via JazzCash app and submit TID');
-    setPmInstructionsUr('جاز کیش کے ذریعے رقم بھیج کر رسید جمع کروائیں');
+    setPmInstructions('');
+    setPmInstructionsUr('');
     setPmQrCodeBase64('');
     setPmActive(true);
     setIsEditingPm(true);
@@ -575,6 +584,8 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
           instructionsUr: pmInstructionsUr.trim(),
           qrCodeUrl: pmQrCodeBase64 || undefined,
           active: pmActive,
+          isActive: pmActive,
+          status: pmActive ? 'active' : 'disabled',
         });
         setPmActionMessage('Payment method updated successfully.');
       } else {
@@ -589,6 +600,8 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
           instructionsUr: pmInstructionsUr.trim(),
           qrCodeUrl: pmQrCodeBase64 || undefined,
           active: pmActive,
+          isActive: pmActive,
+          status: pmActive ? 'active' : 'disabled',
           displayOrder: paymentMethods.length + 1,
         });
         setPmActionMessage('New payment method added successfully.');
@@ -622,10 +635,6 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
 
   const handleDeletePaymentMethod = async (id: string) => {
     setPmErrorMessage(null);
-    if (paymentMethods.length <= 1) {
-      setPmErrorMessage('At least one payment method must remain active for user deposits.');
-      return;
-    }
     try {
       await apiDeletePaymentMethod(adminUser, id);
       setPmActionMessage('Payment account deleted.');
@@ -636,8 +645,13 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
   };
 
   const handleTogglePaymentMethodActive = async (pm: PaymentAccount) => {
+    const nextActive = !pm.active;
     try {
-      await apiUpdatePaymentMethod(adminUser, pm.id, { active: !pm.active });
+      await apiUpdatePaymentMethod(adminUser, pm.id, {
+        active: nextActive,
+        isActive: nextActive,
+        status: nextActive ? 'active' : 'disabled',
+      });
     } catch (err: any) {
       setPmErrorMessage(err.message || 'Error toggling payment method');
     }
@@ -652,36 +666,22 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
 
   const handleBannerFileUpload = async (bannerId: string, file: File) => {
     if (!file) return;
-    if (file.size > MAX_VIDEO_SIZE) {
-      alert(isUr ? 'فائل کا سائز 50MB سے زیادہ ہے۔ براہ کرم 50MB سے کم فائل منتخب کریں۔' : 'File size exceeds 50MB limit. Please upload a file under 50MB.');
+    const validation = validateMediaUploadFile(file, 'photo');
+    if (!validation.valid) {
+      setBannerFeedbackMsg(isUr ? (validation.errorUrdu || validation.error || '') : (validation.error || 'Invalid file.'));
       return;
     }
     try {
-      const res = await apiUploadMedia({
-        dataUrl: await new Promise<string>((resolve) => {
-          const r = new FileReader();
-          r.onload = () => resolve(r.result as string);
-          r.readAsDataURL(file);
-        }),
-        fileName: file.name,
-        fileType: file.type,
-        folder: 'banners',
-      });
+      const res = await apiUploadMedia(file, 'banners', 'photo');
       if (res && res.url) {
         handleUpdateBannerField(bannerId, 'imageUrl', res.url);
+        setBannerFeedbackMsg(isUr ? 'بینر تصویر سرور پر اپ لوڈ ہو گئی!' : 'Banner image uploaded to server.');
+        setTimeout(() => setBannerFeedbackMsg(null), 3500);
         return;
       }
-    } catch {
-      // Local fallback
+    } catch (err: any) {
+      setBannerFeedbackMsg(err?.message || 'Banner upload failed.');
     }
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const dataUrl = e.target?.result as string;
-      if (dataUrl) {
-        handleUpdateBannerField(bannerId, 'imageUrl', dataUrl);
-      }
-    };
-    reader.readAsDataURL(file);
   };
 
   const handleSaveBanner = async (banner: FarmBanner) => {
@@ -724,29 +724,28 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
     }
   };
 
-  // 1. Increase Video Upload Size Limit (Backend 50MB limit support)
-  const MAX_VIDEO_SIZE = 50 * 1024 * 1024; // 50MB limit for smooth uploads
-
   // Farm Gallery Management Handlers (Admin Media & Video Management)
   const handleGalleryFileUpload = async (file: File) => {
     if (!file) return;
-    if (file.size > MAX_VIDEO_SIZE) {
+    const validation = validateMediaUploadFile(file, newGalleryType);
+    if (!validation.valid) {
       setGalleryFeedbackMsg(
-        isUr
-          ? 'ویڈیو کا سائز بہت بڑا ہے۔ براہ کرم 50MB سے کم کی ویڈیو اپ لوڈ کریں۔'
-          : 'Video size is too large. Please upload a video under 50MB.'
+        isUr ? (validation.errorUrdu || validation.error || 'فائل درست نہیں ہے۔') : (validation.error || 'Invalid media file.')
       );
       return;
     }
+
+    const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
     setIsUploadingGalleryFile(true);
     setGalleryFeedbackMsg(
       isUr
-        ? 'فائل سرور پر اپ لوڈ کی جا رہی ہے (زیادہ سے زیادہ 50MB)...'
-        : `Uploading media to server (Max 50MB, ${(file.size / (1024 * 1024)).toFixed(1)} MB)...`
+        ? `فائل سرور پر سٹریم کی جا رہی ہے (${sizeMb} MB)...`
+        : `Streaming ${newGalleryType} to server (${sizeMb} MB / 50 MB max)...`
     );
+
     try {
-      // 50MB backend upload endpoint
-      const uploadRes = await apiUploadMedia(file);
+      // Binary stream upload to /api/upload-raw avoids base64 JSON inflation & 413 payload errors
+      const uploadRes = await apiUploadMedia(file, 'gallery', newGalleryType);
       if (uploadRes && uploadRes.url) {
         setNewGalleryMediaUrl(uploadRes.url);
         if (newGalleryType === 'photo') {
@@ -754,29 +753,19 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
         }
         setGalleryFeedbackMsg(
           isUr
-            ? 'فائل کامیابی سے سرور پر اپ لوڈ ہو گئی!'
-            : `File uploaded successfully to server (${(file.size / (1024 * 1024)).toFixed(1)} MB)!`
+            ? `فائل کامیابی سے سرور پر محفوظ ہو گئی (${sizeMb} MB)!`
+            : `Uploaded cleanly to server (${sizeMb} MB)! Ready to publish.`
         );
+      } else {
+        throw new Error('Server did not return a valid media URL.');
       }
     } catch (uploadErr: any) {
-      console.warn('Backend upload failed, attempting local fallback:', uploadErr);
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const result = e.target?.result as string;
-        if (result) {
-          setNewGalleryMediaUrl(result);
-          if (newGalleryType === 'photo') {
-            setNewGalleryThumbnailUrl(result);
-          }
-        }
-        setIsUploadingGalleryFile(false);
-      };
-      reader.onerror = () => {
-        setIsUploadingGalleryFile(false);
-        setGalleryFeedbackMsg('Failed to process file on device.');
-      };
-      reader.readAsDataURL(file);
-      return;
+      setGalleryFeedbackMsg(
+        uploadErr?.message ||
+          (isUr
+            ? 'سرور پر اپ لوڈ ناکام رہا۔ براہ کرم 50MB سے کم درست MP4/تصویر فائل منتخب کریں۔'
+            : 'Upload failed. Please verify the file is under 50MB and try again.')
+      );
     } finally {
       setIsUploadingGalleryFile(false);
     }
@@ -801,21 +790,18 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
 
       // If mediaUrl is a base64 string, upload to backend first to preserve lightweight Firestore storage
       if (finalMediaUrl.startsWith('data:')) {
-        try {
-          const uploaded = await apiUploadMedia({
-            dataUrl: finalMediaUrl,
-            fileName: `${newGalleryTitle.trim().replace(/\s+/g, '_')}_${Date.now()}`,
-            fileType: newGalleryType === 'video' ? 'video/mp4' : 'image/jpeg',
-            folder: 'gallery',
-          });
-          if (uploaded && uploaded.url) {
-            finalMediaUrl = uploaded.url;
-            if (newGalleryType === 'photo' || !finalThumbUrl || finalThumbUrl.startsWith('data:')) {
-              finalThumbUrl = uploaded.url;
-            }
-          }
-        } catch (upErr) {
-          console.warn('Backend base64 upload fallback:', upErr);
+        const uploaded = await apiUploadMedia({
+          dataUrl: finalMediaUrl,
+          fileName: `${newGalleryTitle.trim().replace(/\s+/g, '_')}_${Date.now()}`,
+          fileType: newGalleryType === 'video' ? 'video/mp4' : 'image/jpeg',
+          folder: 'gallery',
+        });
+        if (!uploaded || !uploaded.url) {
+          throw new Error('Failed to store uploaded media on server.');
+        }
+        finalMediaUrl = uploaded.url;
+        if (newGalleryType === 'photo' || !finalThumbUrl || finalThumbUrl.startsWith('data:')) {
+          finalThumbUrl = uploaded.url;
         }
       }
 
@@ -931,51 +917,39 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
   const handleAvatarFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (file.size > MAX_VIDEO_SIZE) {
-      alert(isUr ? 'فائل کا سائز 50MB سے زیادہ ہے۔' : 'File size exceeds 50MB limit.');
+    const validation = validateMediaUploadFile(file, 'photo');
+    if (!validation.valid) {
+      setProfileFeedbackMsg(isUr ? (validation.errorUrdu || validation.error || '') : (validation.error || 'Invalid file.'));
       return;
     }
     try {
-      const res = await apiUploadMedia(file);
+      const res = await apiUploadMedia(file, 'profile', 'photo');
       if (res && res.url) {
         setProfileAvatar(res.url);
         return;
       }
-    } catch {
-      // Local fallback
+    } catch (err: any) {
+      setProfileFeedbackMsg(err?.message || 'Error uploading avatar');
     }
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        setProfileAvatar(reader.result);
-      }
-    };
-    reader.readAsDataURL(file);
   };
 
   const handleCoverFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (file.size > MAX_VIDEO_SIZE) {
-      alert(isUr ? 'فائل کا سائز 50MB سے زیادہ ہے۔' : 'File size exceeds 50MB limit.');
+    const validation = validateMediaUploadFile(file, 'photo');
+    if (!validation.valid) {
+      setProfileFeedbackMsg(isUr ? (validation.errorUrdu || validation.error || '') : (validation.error || 'Invalid file.'));
       return;
     }
     try {
-      const res = await apiUploadMedia(file);
+      const res = await apiUploadMedia(file, 'profile', 'photo');
       if (res && res.url) {
         setProfileCover(res.url);
         return;
       }
-    } catch {
-      // Local fallback
+    } catch (err: any) {
+      setProfileFeedbackMsg(err?.message || 'Error uploading cover photo');
     }
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        setProfileCover(reader.result);
-      }
-    };
-    reader.readAsDataURL(file);
   };
 
   const handleResetGalleryToDefaults = async () => {
@@ -3113,9 +3087,13 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
                       type="file"
                       accept={newGalleryType === 'photo' ? 'image/*' : 'video/*'}
                       className="hidden"
+                      disabled={isUploadingGalleryFile}
                       onChange={(e) => {
                         const file = e.target.files?.[0];
-                        if (file) handleGalleryFileUpload(file);
+                        if (file) {
+                          handleGalleryFileUpload(file);
+                        }
+                        e.target.value = '';
                       }}
                     />
                   </label>

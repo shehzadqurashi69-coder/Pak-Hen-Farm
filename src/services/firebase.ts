@@ -73,6 +73,9 @@ import {
   calculateShedDynamicSum,
   calculateCatchUpCycles,
   syncUserPackagesExpiry,
+  isPaymentAccountActive,
+  evaluateReferralMilestones,
+  getReferralCommissionRateForPackage,
 } from '../utils/farmRules';
 
 // --------------------------------------------------------------------------------------
@@ -537,69 +540,17 @@ export function subscribeToMyReferrals(
 
 // ---------------- CLOUD SAVING (ORDERS / PACKAGES) ----------------
 
-// ---------------- DYNAMIC PAYMENT METHODS (ADMIN CONTROL) ----------------
+// ---------------- DYNAMIC PAYMENT METHODS (STRICT ADMIN CONTROL) ----------------
 
-export const INITIAL_PAYMENT_METHODS: PaymentAccount[] = [
-  {
-    id: 'pm-jazzcash',
-    type: 'jazzcash',
-    title: 'JazzCash Official',
-    titleUr: 'جاز کیش آفیشل',
-    accountTitle: 'Pak Hen Farm Official',
-    accountNumber: '980722735',
-    instructions: 'Send money to JazzCash Mobile Account & enter TID below',
-    instructionsUr: 'جاز کیش موبائل اکاؤنٹ پر رقم منتقل کر کے TID درج کریں',
-    active: true,
-    displayOrder: 1,
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: 'pm-easypaisa',
-    type: 'easypaisa',
-    title: 'Easypaisa Official',
-    titleUr: 'ایزی پیسہ آفیشل',
-    accountTitle: 'Pak Hen Farm Official',
-    accountNumber: '03451122334',
-    instructions: 'Send money to Easypaisa Account & enter TID below',
-    instructionsUr: 'ایزی پیسہ اکاؤنٹ پر رقم بھیج کر TID نیچے درج کریں',
-    active: true,
-    displayOrder: 2,
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: 'pm-meezan',
-    type: 'bank',
-    title: 'Meezan Bank Ltd',
-    titleUr: 'میزان بینک لمیٹڈ',
-    accountTitle: 'Pak Hen Farm (Pvt) Ltd',
-    accountNumber: '01010102938475',
-    bankName: 'Meezan Bank (Islamic)',
-    instructions: 'Transfer via IBFT / Raast to Meezan Bank',
-    instructionsUr: 'میزان بینک پر IBFT یا راست کے ذریعے ٹرانسفر کریں',
-    active: true,
-    displayOrder: 3,
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: 'pm-usdt',
-    type: 'usdt',
-    title: 'USDT (TRC-20)',
-    titleUr: 'یو ایس ڈی ٹی (TRC20)',
-    accountTitle: 'Pak Hen Farm Official',
-    accountNumber: 'TPACKdX3KrTBHHMLdBmmw37uC9FmUsVPoc',
-    instructions: 'Send USDT on TRON (TRC20) network only',
-    instructionsUr: 'صرف TRON (TRC20) نیٹ ورک پر USDT ٹرانسفر کریں',
-    active: true,
-    displayOrder: 4,
-    createdAt: new Date().toISOString(),
-  },
-];
+// Strictly empty: zero hardcoded mock accounts or phantom numbers.
+// Payment accounts only exist when explicitly created and enabled by Admin.
+export const INITIAL_PAYMENT_METHODS: PaymentAccount[] = [];
 
 export function subscribeToPaymentMethods(callback: (methods: PaymentAccount[]) => void): Unsubscribe {
   const pmRef = collection(db, 'paymentMethods');
   return onSnapshot(
     pmRef,
-    async (snapshot) => {
+    (snapshot) => {
       try {
         const list: PaymentAccount[] = [];
         snapshot.forEach((d) => {
@@ -607,30 +558,28 @@ export function subscribeToPaymentMethods(callback: (methods: PaymentAccount[]) 
           if (d.id !== 'settings' && d.id !== 'customGreeting') {
             const data = d.data() as PaymentAccount;
             if (data.title && data.accountNumber) {
-              list.push({ ...data, id: data.id || d.id });
+              const normalizedActive = isPaymentAccountActive(data);
+              list.push({
+                ...data,
+                id: data.id || d.id,
+                active: normalizedActive,
+                isActive: normalizedActive,
+                status: normalizedActive ? 'active' : 'disabled',
+              });
             }
           }
         });
-
-        if (list.length === 0) {
-          // Initialize default payment methods in Firestore
-          for (const pm of INITIAL_PAYMENT_METHODS) {
-            await setDoc(doc(db, 'paymentMethods', pm.id), pm);
-          }
-          callback(INITIAL_PAYMENT_METHODS);
-          return;
-        }
 
         list.sort((a, b) => (a.displayOrder || 0) - (b.displayOrder || 0));
         callback(list);
       } catch (err) {
         console.warn('subscribeToPaymentMethods warning:', err);
-        callback(INITIAL_PAYMENT_METHODS);
+        callback([]);
       }
     },
     (err) => {
       console.warn('subscribeToPaymentMethods error:', err);
-      callback(INITIAL_PAYMENT_METHODS);
+      callback([]);
     }
   );
 }
@@ -652,9 +601,13 @@ export async function cloudAddPaymentMethod(
       cleanData[key] = value;
     }
   }
+  const enabledFlag = Boolean(method.active ?? method.isActive ?? (method.status ? method.status === 'active' : true));
   const newAccount: PaymentAccount = {
     ...cleanData,
     id,
+    active: enabledFlag,
+    isActive: enabledFlag,
+    status: enabledFlag ? 'active' : 'disabled',
     createdAt: new Date().toISOString(),
   };
 
@@ -672,6 +625,21 @@ export async function cloudUpdatePaymentMethod(
     if (value !== undefined) {
       cleanUpdates[key] = value;
     }
+  }
+  const hasActiveFlag =
+    typeof updates.active === 'boolean' ||
+    typeof updates.isActive === 'boolean' ||
+    typeof updates.status === 'string';
+  if (hasActiveFlag) {
+    const enabledFlag =
+      typeof updates.active === 'boolean'
+        ? updates.active
+        : typeof updates.isActive === 'boolean'
+        ? updates.isActive
+        : updates.status === 'active';
+    cleanUpdates.active = enabledFlag;
+    cleanUpdates.isActive = enabledFlag;
+    cleanUpdates.status = enabledFlag ? 'active' : 'disabled';
   }
   await updateDoc(ref, cleanUpdates);
 }
@@ -931,31 +899,141 @@ export async function cloudApproveOrder(order: HenOrder, adminNote?: string): Pr
     });
   }
 
-  // 3. Strict 10% Auto-Commission Rule:
-  // When an invited user purchases a package AND the admin approves that deposit,
-  // automatically calculate 10% of the purchased package price and instantly credit to Inviter's wallet.
+  // 3. Direct Referral Commission (10% base, or 15% when Target C/D unlocked) & Milestone Target Bonus Crediting:
   if (inviterReferralCode && inviterReferralCode.trim()) {
     try {
-      const commissionAmount = calculateReferralCommission(order.amount);
-      if (commissionAmount > 0) {
-        const usersRef = collection(db, 'users');
-        const q = query(usersRef, where('referralCode', '==', inviterReferralCode.trim()));
-        const inviterSnap = await getDocs(q);
+      const usersRef = collection(db, 'users');
+      const inviterQuery = query(usersRef, where('referralCode', '==', inviterReferralCode.trim()));
+      const inviterSnap = await getDocs(inviterQuery);
 
-        if (!inviterSnap.empty) {
-          const inviterDoc = inviterSnap.docs[0];
-          const inviterRef = doc(db, 'users', inviterDoc.id);
-          const inviterData = inviterDoc.data() as UserAccount;
+      if (!inviterSnap.empty) {
+        const inviterDoc = inviterSnap.docs[0];
+        const inviterRef = doc(db, 'users', inviterDoc.id);
+        const inviterData = inviterDoc.data() as UserAccount;
+        const prevClaimed = Array.isArray(inviterData.claimedMilestoneTargets)
+          ? inviterData.claimedMilestoneTargets
+          : [];
+
+        // Apply 10% base rate or 15% if Target C / Target D was already unlocked
+        const commissionRate = getReferralCommissionRateForPackage(
+          order.amount,
+          order.hensCount,
+          prevClaimed
+        );
+        const commissionAmount = calculateReferralCommission(order.amount, commissionRate);
+
+        // Fetch all referrals for this inviter to evaluate Milestone Targets A, B, C, D
+        const refsQuery = query(usersRef, where('referredBy', '==', inviterReferralCode.trim()));
+        const refsSnap = await getDocs(refsQuery);
+        const allReferrals: UserAccount[] = [];
+        refsSnap.forEach((d) => {
+          allReferrals.push(d.data() as UserAccount);
+        });
+
+        const milestoneEval = evaluateReferralMilestones(allReferrals, prevClaimed);
+        const newTargetIds = milestoneEval.newlyUnlockedTargets.map((t) => t.id);
+        const milestoneBonus = milestoneEval.pendingBonusTotal;
+        const totalCredit = commissionAmount + milestoneBonus;
+
+        if (totalCredit > 0 || newTargetIds.length > 0) {
           const currentWallet = Number(inviterData.walletBalance) || 0;
+          const prevBonusEarned = Number(inviterData.milestoneBonusesEarned) || 0;
           await updateDoc(inviterRef, {
-            walletBalance: currentWallet + commissionAmount,
+            walletBalance: currentWallet + totalCredit,
+            claimedMilestoneTargets: Array.from(new Set([...prevClaimed, ...newTargetIds])),
+            milestoneBonusesEarned: prevBonusEarned + milestoneBonus,
+          });
+        }
+
+        // Notify inviter in Farm Inbox when a Milestone Target Bonus unlocks
+        if (milestoneEval.newlyUnlockedTargets.length > 0) {
+          const unlockedNames = milestoneEval.newlyUnlockedTargets.map((t) => t.titleEn).join(', ');
+          const alertId = `ALT-MS-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`;
+          await setDoc(doc(db, 'alerts', alertId), {
+            id: alertId,
+            userId: inviterDoc.id,
+            shedId: 'Referral Program',
+            type: 'admin_message',
+            titleEn: `Milestone Target Unlocked (+Rs. ${milestoneBonus.toLocaleString()})`,
+            titleUr: `ریفرل ہدف مکمل (+${milestoneBonus.toLocaleString()} روپے بونس)`,
+            messageEn: `Congratulations! You achieved ${unlockedNames}. An extra Rs. ${milestoneBonus.toLocaleString()} milestone reward has been credited directly to your wallet.`,
+            messageUr: `مبارک ہو! آپ نے ریفرل ہدف مکمل کر لیا ہے اور ${milestoneBonus.toLocaleString()} روپے اضافی بونس آپ کے والٹ میں شامل کر دیا گیا ہے۔`,
+            senderHeader: 'From: Pak Hen Farm',
+            createdAt: new Date().toISOString(),
+            read: false,
           });
         }
       }
     } catch (commErr) {
-      console.error('Failed to credit 10% referral commission:', commErr);
+      console.error('Failed to credit referral commission/milestone bonus:', commErr);
     }
   }
+}
+
+/**
+ * Safely claims any reached-but-unclaimed Milestone Target bonuses (Target A/B/C/D)
+ * inside a Firestore transaction to prevent double-crediting.
+ */
+export async function cloudClaimReferralMilestone(
+  userId: string,
+  targetId?: string
+): Promise<{ updatedUser: UserAccount; creditedAmount: number; claimedIds: string[] }> {
+  const userRef = doc(db, 'users', userId);
+  const userSnapInitial = await getDoc(userRef);
+  if (!userSnapInitial.exists()) {
+    throw new Error('User account not found.');
+  }
+  const userInitial = userSnapInitial.data() as UserAccount;
+
+  const usersRef = collection(db, 'users');
+  const refsQuery = query(usersRef, where('referredBy', '==', userInitial.referralCode));
+  const refsSnap = await getDocs(refsQuery);
+  const allReferrals: UserAccount[] = [];
+  refsSnap.forEach((d) => allReferrals.push(d.data() as UserAccount));
+
+  let creditedAmount = 0;
+  let claimedIds: string[] = [];
+
+  const updatedUser = await runTransaction(db, async (tx) => {
+    const snap = await tx.get(userRef);
+    if (!snap.exists()) throw new Error('User account not found.');
+    const freshUser = snap.data() as UserAccount;
+    const prevClaimed = Array.isArray(freshUser.claimedMilestoneTargets)
+      ? freshUser.claimedMilestoneTargets
+      : [];
+
+    const evalRes = evaluateReferralMilestones(allReferrals, prevClaimed);
+    const eligibleTargets = targetId
+      ? evalRes.newlyUnlockedTargets.filter((t) => t.id === targetId)
+      : evalRes.newlyUnlockedTargets;
+
+    if (eligibleTargets.length === 0) {
+      creditedAmount = 0;
+      claimedIds = [];
+      return freshUser;
+    }
+
+    creditedAmount = eligibleTargets.reduce((sum, t) => sum + t.bonusAmountPkr, 0);
+    claimedIds = eligibleTargets.map((t) => t.id);
+    const nextClaimed = Array.from(new Set([...prevClaimed, ...claimedIds]));
+    const nextBalance = (Number(freshUser.walletBalance) || 0) + creditedAmount;
+    const nextBonusesEarned = (Number(freshUser.milestoneBonusesEarned) || 0) + creditedAmount;
+
+    tx.update(userRef, {
+      walletBalance: nextBalance,
+      claimedMilestoneTargets: nextClaimed,
+      milestoneBonusesEarned: nextBonusesEarned,
+    });
+
+    return {
+      ...freshUser,
+      walletBalance: nextBalance,
+      claimedMilestoneTargets: nextClaimed,
+      milestoneBonusesEarned: nextBonusesEarned,
+    };
+  });
+
+  return { updatedUser, creditedAmount, claimedIds };
 }
 
 /**
@@ -1756,7 +1834,7 @@ export async function cloudSubmitMedicalPaymentTid(params: {
   hensCount: number;
   perHenRate: number;
   amount: number;
-  paymentMethod: 'wallet' | 'jazzcash' | 'usdt';
+  paymentMethod: 'wallet' | PaymentMethodType;
   tid: string;
   senderName?: string;
   senderNumber?: string;

@@ -3,7 +3,7 @@
  * Pure functions decoupled from React UI for deterministic testing and rock-solid state management.
  */
 
-import { HenPackage, PurchasedPackage, UserAccount, FarmShed, UserAlert, ShedPerformancePoint, FarmBanner, FarmGalleryItem, FarmProfileSettings } from '../types/farm';
+import { HenPackage, PurchasedPackage, UserAccount, FarmShed, UserAlert, ShedPerformancePoint, FarmBanner, FarmGalleryItem, FarmProfileSettings, PaymentAccount } from '../types/farm';
 
 export const EGG_PRICE_PKR = 30; // 1 Egg = Rs. 30
 export const MIN_WITHDRAWAL_EGGS = 10; // 10 Eggs = Rs. 300
@@ -247,10 +247,6 @@ export const OFFICIAL_INFO = {
   taglineUr: 'پورے پاکستان میں حقیقی فزیکل پولٹری فارمنگ',
   trustBadge: 'Pak Hen Farm is a 100% real physical poultry farm providing services all over Pakistan.',
   trustBadgeUrdu: 'پاک ہین فارم ایک 100% حقیقی فزیکل پولٹری فارم ہے جو پورے پاکستان میں اپنی خدمات فراہم کر رہا ہے۔',
-  usdtTrc20Address: 'TPACKdX3KrTBHHMLdBmmw37uC9FmUsVPoc',
-  usdtNetwork: 'USDT (TRC20)',
-  jazzCashAccountTitle: 'Pak Hen Farm Official',
-  jazzCashAccountNumber: '980722735',
   helpline: '03105625924',
   adminEmail: 'shehzadqurashi69@gmail.com',
   adminEmails: ['shehzadqurashi69@gmail.com', 'shehzadqurashi9@gmail.com', 'admin@pakhenfarm.com'],
@@ -263,9 +259,212 @@ export const REFERRAL_COMMISSION_PERCENT = 10; // 10% auto-commission on approve
  * Calculates 10% auto-commission on an approved package purchase.
  * e.g., Rs. 100 for a Rs. 1000 package, Rs. 500 for a Rs. 5000 package, Rs. 800 for Rs. 8000.
  */
-export function calculateReferralCommission(packagePrice: number): number {
+export function calculateReferralCommission(
+  packagePrice: number,
+  commissionPercent: number = REFERRAL_COMMISSION_PERCENT
+): number {
   const price = Math.max(0, Number(packagePrice) || 0);
-  return Math.round((price * REFERRAL_COMMISSION_PERCENT) / 100);
+  const pct = Math.max(0, Number(commissionPercent) || 0);
+  return Math.round((price * pct) / 100);
+}
+
+export type MilestoneTargetId = 'target_a' | 'target_b' | 'target_c' | 'target_d';
+
+export interface MilestoneTargetConfig {
+  id: MilestoneTargetId;
+  code: 'A' | 'B' | 'C' | 'D';
+  packagePricePkr: number;
+  hensCount: number;
+  requiredReferrals: number;
+  rewardType: 'fixed_bonus' | 'commission_boost';
+  bonusAmountPkr: number;
+  enhancedCommissionPercent: number;
+  titleEn: string;
+  titleUr: string;
+  packageLabelEn: string;
+  packageLabelUr: string;
+  rewardLabelEn: string;
+  rewardLabelUr: string;
+  descEn: string;
+  descUr: string;
+}
+
+export const MILESTONE_TARGETS: MilestoneTargetConfig[] = [
+  {
+    id: 'target_a',
+    code: 'A',
+    packagePricePkr: 1000,
+    hensCount: 1,
+    requiredReferrals: 10,
+    rewardType: 'fixed_bonus',
+    bonusAmountPkr: 1000,
+    enhancedCommissionPercent: 10,
+    titleEn: 'Target A — Starter Flock Bonus',
+    titleUr: 'ہدف A — اسٹارٹر فلاک بونس',
+    packageLabelEn: '1,000 PKR Package (1 Hen)',
+    packageLabelUr: '1,000 روپے پیکج (1 مرغی)',
+    rewardLabelEn: '+Rs. 1,000 Wallet Bonus',
+    rewardLabelUr: '+1,000 روپے والٹ بونس',
+    descEn: 'Refer 10 friends who buy the Rs. 1,000 (1 Hen) package to unlock an extra PKR 1,000 wallet bonus.',
+    descUr: '1,000 روپے (1 مرغی) کا پیکج خریدنے والے 10 دوستوں کو مدعو کریں اور 1,000 روپے اضافی بونس پائیں۔',
+  },
+  {
+    id: 'target_b',
+    code: 'B',
+    packagePricePkr: 2700,
+    hensCount: 3,
+    requiredReferrals: 10,
+    rewardType: 'fixed_bonus',
+    bonusAmountPkr: 2700,
+    enhancedCommissionPercent: 10,
+    titleEn: 'Target B — 3-Hen Growth Bonus',
+    titleUr: 'ہدف B — 3 مرغیوں کا گروتھ بونس',
+    packageLabelEn: '2,700 PKR Package (3 Hens)',
+    packageLabelUr: '2,700 روپے پیکج (3 مرغیاں)',
+    rewardLabelEn: '+Rs. 2,700 Wallet Bonus',
+    rewardLabelUr: '+2,700 روپے والٹ بونس',
+    descEn: 'Refer 10 friends who buy the Rs. 2,700 (3 Hens) package to unlock an extra PKR 2,700 wallet bonus.',
+    descUr: '2,700 روپے (3 مرغیاں) کا پیکج خریدنے والے 10 دوستوں کو مدعو کریں اور 2,700 روپے اضافی بونس پائیں۔',
+  },
+  {
+    id: 'target_c',
+    code: 'C',
+    packagePricePkr: 4000,
+    hensCount: 5,
+    requiredReferrals: 5,
+    rewardType: 'commission_boost',
+    bonusAmountPkr: 1000, // +5% upgrade catch-up across 5 x Rs. 4,000 packages (Rs. 200 x 5)
+    enhancedCommissionPercent: 15,
+    titleEn: 'Target C — 15% Commission Upgrade',
+    titleUr: 'ہدف C — 15% کمیشن اپ گریڈ',
+    packageLabelEn: '4,000 PKR Package (5 Hens)',
+    packageLabelUr: '4,000 روپے پیکج (5 مرغیاں)',
+    rewardLabelEn: '15% Commission + Rs. 1,000 Bonus',
+    rewardLabelUr: '15% کمیشن + 1,000 روپے بونس',
+    descEn: 'Refer 5 friends who buy the Rs. 4,000 (5 Hens) package to unlock 15% enhanced commission & Rs. 1,000 milestone bonus.',
+    descUr: '4,000 روپے (5 مرغیاں) کا پیکج خریدنے والے 5 دوستوں کو مدعو کریں اور 15% کمیشن + 1,000 روپے بونس پائیں۔',
+  },
+  {
+    id: 'target_d',
+    code: 'D',
+    packagePricePkr: 8000,
+    hensCount: 10,
+    requiredReferrals: 10,
+    rewardType: 'commission_boost',
+    bonusAmountPkr: 4000, // +5% upgrade catch-up across 10 x Rs. 8,000 packages (Rs. 400 x 10)
+    enhancedCommissionPercent: 15,
+    titleEn: 'Target D — High-Tier 15% VIP Partner',
+    titleUr: 'ہدف D — 15% ہائی ٹائر VIP پارٹنر',
+    packageLabelEn: '8,000 PKR Package (10 Hens)',
+    packageLabelUr: '8,000 روپے پیکج (10 مرغیاں)',
+    rewardLabelEn: '15% High-Tier + Rs. 4,000 Bonus',
+    rewardLabelUr: '15% ہائی ٹائر + 4,000 روپے بونس',
+    descEn: 'Refer 10 friends who buy the Rs. 8,000 (10 Hens) package to unlock 15% high-tier commission & Rs. 4,000 reward.',
+    descUr: '8,000 روپے (10 مرغیاں) کا پیکج خریدنے والے 10 دوستوں کو مدعو کریں اور 15% ہائی ٹائر کمیشن + 4,000 روپے انعام پائیں۔',
+  },
+];
+
+export interface MilestoneProgressItem {
+  target: MilestoneTargetConfig;
+  completedCount: number;
+  cappedCount: number;
+  progressPercent: number;
+  isReached: boolean;
+  isClaimed: boolean;
+  isClaimable: boolean;
+}
+
+export interface MilestoneEvaluationResult {
+  items: MilestoneProgressItem[];
+  newlyUnlockedTargets: MilestoneTargetConfig[];
+  pendingBonusTotal: number;
+  unlockedCommissionRateC: number; // 10 or 15
+  unlockedCommissionRateD: number; // 10 or 15
+}
+
+/**
+ * Matches whether an approved purchased package qualifies for a given Milestone Target tier.
+ */
+export function doesPackageMatchMilestone(
+  pkg: Pick<PurchasedPackage, 'purchasePrice' | 'hens'>,
+  target: MilestoneTargetConfig
+): boolean {
+  const price = Number(pkg.purchasePrice) || 0;
+  const hens = Number(pkg.hens) || 0;
+  return price === target.packagePricePkr || hens === target.hensCount;
+}
+
+/**
+ * Evaluates a user's referral list against Targets A, B, C, and D.
+ * Counts unique invited users (one count per referred user per target tier) who purchased
+ * an approved package matching that target.
+ */
+export function evaluateReferralMilestones(
+  referrals: Pick<UserAccount, 'id' | 'packages'>[],
+  claimedTargets: string[] = []
+): MilestoneEvaluationResult {
+  const safeReferrals = Array.isArray(referrals) ? referrals : [];
+  const claimedSet = new Set(Array.isArray(claimedTargets) ? claimedTargets : []);
+
+  const items: MilestoneProgressItem[] = MILESTONE_TARGETS.map((target) => {
+    const qualifiedBuyerIds = new Set<string>();
+    for (const refUser of safeReferrals) {
+      const pkgs = Array.isArray(refUser.packages) ? refUser.packages : [];
+      if (pkgs.some((pkg) => doesPackageMatchMilestone(pkg, target))) {
+        qualifiedBuyerIds.add(refUser.id);
+      }
+    }
+
+    const completedCount = qualifiedBuyerIds.size;
+    const cappedCount = Math.min(completedCount, target.requiredReferrals);
+    const progressPercent = Math.min(100, Math.round((cappedCount / target.requiredReferrals) * 100));
+    const isReached = completedCount >= target.requiredReferrals;
+    const isClaimed = claimedSet.has(target.id);
+    const isClaimable = isReached && !isClaimed;
+
+    return {
+      target,
+      completedCount,
+      cappedCount,
+      progressPercent,
+      isReached,
+      isClaimed,
+      isClaimable,
+    };
+  });
+
+  const newlyUnlockedTargets = items.filter((item) => item.isClaimable).map((item) => item.target);
+  const pendingBonusTotal = newlyUnlockedTargets.reduce((sum, t) => sum + t.bonusAmountPkr, 0);
+
+  const targetCReached = items.find((i) => i.target.id === 'target_c')?.isReached || claimedSet.has('target_c');
+  const targetDReached = items.find((i) => i.target.id === 'target_d')?.isReached || claimedSet.has('target_d');
+
+  return {
+    items,
+    newlyUnlockedTargets,
+    pendingBonusTotal,
+    unlockedCommissionRateC: targetCReached ? 15 : REFERRAL_COMMISSION_PERCENT,
+    unlockedCommissionRateD: targetDReached ? 15 : REFERRAL_COMMISSION_PERCENT,
+  };
+}
+
+/**
+ * Computes direct referral commission percentage for an approved package purchase,
+ * applying 15% when Target C (4,000 PKR / 5 Hens) or Target D (8,000 PKR / 10 Hens) is unlocked.
+ */
+export function getReferralCommissionRateForPackage(
+  packagePrice: number,
+  hensCount: number,
+  unlockedTargets: string[] = []
+): number {
+  const unlocked = new Set(unlockedTargets);
+  if ((packagePrice === 4000 || hensCount === 5) && unlocked.has('target_c')) {
+    return 15;
+  }
+  if ((packagePrice === 8000 || hensCount === 10) && unlocked.has('target_d')) {
+    return 15;
+  }
+  return REFERRAL_COMMISSION_PERCENT;
 }
 
 export function isAdminEmail(email?: string | null): boolean {
@@ -1187,4 +1386,99 @@ export function calculateMortalityFinancialDeduction(
     newWalletBalance,
   };
 }
+
+// ---------------- STRICT PAYMENT METHOD FILTERING & MEDIA VALIDATION ----------------
+
+/**
+ * Checks strictly whether an admin-configured PaymentAccount is active.
+ * Never returns disabled accounts or accounts missing an account number/title.
+ */
+export function isPaymentAccountActive(pm?: PaymentAccount | null): boolean {
+  if (!pm) return false;
+  if (!pm.title || !pm.title.trim()) return false;
+  if (!pm.accountNumber || !pm.accountNumber.trim()) return false;
+
+  if (pm.status !== undefined && pm.status !== 'active') return false;
+  if (pm.isActive !== undefined && pm.isActive !== true) return false;
+  if (pm.active !== undefined && pm.active !== true) return false;
+
+  return pm.active === true || pm.isActive === true || pm.status === 'active';
+}
+
+/**
+ * Strictly filters payment methods to ONLY those explicitly enabled by Admin.
+ * Returns an empty array if none are active (never substitutes fallback/mock accounts).
+ */
+export function filterActivePaymentMethods(methods?: PaymentAccount[] | null): PaymentAccount[] {
+  if (!methods || !Array.isArray(methods)) return [];
+  return methods
+    .filter((pm) => isPaymentAccountActive(pm))
+    .sort((a, b) => (a.displayOrder || 0) - (b.displayOrder || 0));
+}
+
+export const MAX_MEDIA_UPLOAD_BYTES = 50 * 1024 * 1024; // 50MB limit
+
+const ALLOWED_VIDEO_EXTENSIONS = ['.mp4', '.webm', '.mov', '.m4v', '.avi', '.mkv'];
+const ALLOWED_IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.svg'];
+
+export interface MediaValidationResult {
+  valid: boolean;
+  error?: string;
+  errorUrdu?: string;
+}
+
+/**
+ * Validates photo or video uploads up to 50MB before binary streaming to backend.
+ */
+export function validateMediaUploadFile(
+  file: { name: string; type?: string; size: number },
+  expectedType?: 'photo' | 'video'
+): MediaValidationResult {
+  if (!file || typeof file.size !== 'number' || file.size <= 0) {
+    return {
+      valid: false,
+      error: 'Selected file is empty or corrupted. Please choose a valid media file.',
+      errorUrdu: 'منتخب کردہ فائل خالی یا خراب ہے۔ براہ کرم درست فائل منتخب کریں۔',
+    };
+  }
+
+  if (file.size > MAX_MEDIA_UPLOAD_BYTES) {
+    const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
+    return {
+      valid: false,
+      error: `File size (${sizeMb} MB) exceeds the 50MB upload limit. Please compress or trim your ${expectedType === 'video' ? 'video' : 'file'} under 50MB.`,
+      errorUrdu: `فائل کا سائز (${sizeMb} MB) 50MB کی حد سے زیادہ ہے۔ براہ کرم 50MB سے کم فائل اپ لوڈ کریں۔`,
+    };
+  }
+
+  const lowerName = (file.name || '').toLowerCase();
+  const dotIdx = lowerName.lastIndexOf('.');
+  const ext = dotIdx !== -1 ? lowerName.slice(dotIdx) : '';
+  const mime = (file.type || '').toLowerCase();
+
+  if (expectedType === 'video') {
+    const isVideoMime = mime.startsWith('video/');
+    const isVideoExt = ALLOWED_VIDEO_EXTENSIONS.includes(ext);
+    if (!isVideoMime && !isVideoExt) {
+      return {
+        valid: false,
+        error: 'Unsupported video format. Please upload MP4, WebM, MOV, or AVI video files.',
+        errorUrdu: 'ویڈیو فارمیٹ درست نہیں ہے۔ براہ کرم MP4، WebM یا MOV ویڈیو اپ لوڈ کریں۔',
+      };
+    }
+  } else if (expectedType === 'photo') {
+    const isImageMime = mime.startsWith('image/');
+    const isImageExt = ALLOWED_IMAGE_EXTENSIONS.includes(ext);
+    if (!isImageMime && !isImageExt) {
+      return {
+        valid: false,
+        error: 'Unsupported image format. Please upload JPG, PNG, or WebP photos.',
+        errorUrdu: 'تصویر کا فارمیٹ درست نہیں ہے۔ براہ کرم JPG، PNG یا WebP تصویر اپ لوڈ کریں۔',
+      };
+    }
+  }
+
+  return { valid: true };
+}
+
 

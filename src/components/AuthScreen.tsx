@@ -4,8 +4,8 @@ import { OFFICIAL_INFO, generateReferralCode } from '../utils/farmRules';
 import { setCurrentUser } from '../services/storage';
 import { apiLogin, apiRegister, apiResetPassword } from '../services/api';
 import { TrustBadge } from './TrustBadge';
-import { t } from '../utils/translations';
-import { Lock, Mail, User, Phone, CreditCard, Gift, Languages, ArrowRight, CheckCircle2, AlertCircle, KeyRound, ArrowLeft } from 'lucide-react';
+import { t, TERMS_MODAL_ITEMS } from '../utils/translations';
+import { Lock, Mail, User, Phone, Gift, Languages, ArrowRight, CheckCircle2, AlertCircle, KeyRound, ArrowLeft, FileText, ShieldCheck, X } from 'lucide-react';
 
 interface AuthScreenProps {
   onSuccess: (user: UserAccount) => void;
@@ -31,10 +31,24 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSuccess, lang, onToggl
   const [fullName, setFullName] = useState('');
   const [phone, setPhone] = useState('');
   const [referralCode, setReferralCode] = useState('');
+  const [agreedToTerms, setAgreedToTerms] = useState(false);
+  const [showTermsModal, setShowTermsModal] = useState(false);
 
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Allow Escape key to close the Terms modal cleanly
+  useEffect(() => {
+    if (!showTermsModal) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setShowTermsModal(false);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [showTermsModal]);
 
   // Check URL query for referral parameter (e.g., ?ref=PHF-1234)
   useEffect(() => {
@@ -94,6 +108,11 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSuccess, lang, onToggl
 
     if (cleanPass.length < 6) {
       setErrorMsg(isUr ? 'پاس ورڈ کم از کم 6 حروف کا ہونا چاہیے۔' : 'Password must be at least 6 characters long.');
+      return;
+    }
+
+    if (!agreedToTerms) {
+      setErrorMsg(strings.mustAgreeTermsError);
       return;
     }
 
@@ -482,6 +501,47 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSuccess, lang, onToggl
                       />
                     </div>
                   </div>
+
+                  {/* Mandatory Bilingual Terms & Conditions Agreement Box */}
+                  <div
+                    dir={isUr ? 'rtl' : 'ltr'}
+                    className={`rounded-2xl border p-3.5 transition-colors space-y-2 ${
+                      agreedToTerms
+                        ? 'border-emerald-500/50 bg-emerald-950/35'
+                        : 'border-[#d4af37]/30 bg-[#051a10]/80'
+                    }`}
+                  >
+                    <label
+                      htmlFor="agree-terms-checkbox"
+                      className="flex items-start gap-2.5 cursor-pointer select-none"
+                    >
+                      <input
+                        id="agree-terms-checkbox"
+                        type="checkbox"
+                        checked={agreedToTerms}
+                        onChange={(e) => {
+                          setAgreedToTerms(e.target.checked);
+                          if (e.target.checked) setErrorMsg('');
+                        }}
+                        aria-required="true"
+                        className="mt-0.5 h-4 w-4 shrink-0 rounded border-[#d4af37]/60 bg-[#051a10] text-[#d4af37] accent-[#d4af37] cursor-pointer"
+                      />
+                      <span className="text-xs font-bold text-[#f4efe6] leading-snug">
+                        {strings.agreeTermsLabel} <span className="text-[#d4af37]">*</span>
+                      </span>
+                    </label>
+
+                    <p className="text-[11px] text-[#f4efe6]/70 leading-relaxed pl-6 pr-1">
+                      {strings.agreeTermsPreview}{' '}
+                      <button
+                        type="button"
+                        onClick={() => setShowTermsModal(true)}
+                        className="inline font-extrabold text-[#f3df88] underline decoration-[#d4af37]/70 underline-offset-2 hover:text-[#d4af37] cursor-pointer"
+                      >
+                        {strings.readMoreBtn}
+                      </button>
+                    </p>
+                  </div>
                 </>
               )}
 
@@ -527,6 +587,100 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSuccess, lang, onToggl
           {strings.authAdminNote}
         </p>
       </div>
+
+      {/* Bilingual Terms & Conditions Modal */}
+      {showTermsModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+          onClick={() => setShowTermsModal(false)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="terms-modal-heading"
+            dir={isUr ? 'rtl' : 'ltr'}
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-xl max-h-[85vh] flex flex-col rounded-3xl border-2 border-[#d4af37]/60 bg-[#0a2618] shadow-2xl overflow-hidden"
+          >
+            {/* Modal Header */}
+            <div className="flex items-start justify-between gap-3 border-b border-[#d4af37]/25 bg-[#051a10] px-5 py-4">
+              <div className="flex items-start gap-3">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#d4af37]/20 border border-[#d4af37]/40 text-[#f3df88]">
+                  <FileText className="h-5 w-5" />
+                </div>
+                <div>
+                  <h3 id="terms-modal-heading" className="text-sm sm:text-base font-black text-[#f3df88] leading-snug">
+                    {strings.termsModalHeading}
+                  </h3>
+                  <span className="inline-flex items-center gap-1 text-[11px] text-emerald-300 font-semibold mt-0.5">
+                    <ShieldCheck className="h-3.5 w-3.5" />
+                    <span>{isUr ? 'اسلامی مضاربہ و مشارکہ پالیسی' : 'Islamic Mudarabah & Musharakah Charter'}</span>
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={onToggleLang}
+                  className="flex items-center gap-1 rounded-full border border-[#d4af37]/40 bg-[#0a2618] px-2.5 py-1 text-[11px] font-bold text-[#f3df88] hover:border-[#d4af37] cursor-pointer"
+                >
+                  <Languages className="h-3 w-3 text-[#d4af37]" />
+                  <span>{isUr ? 'English' : 'اردو'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowTermsModal(false)}
+                  aria-label={isUr ? 'بند کریں' : 'Close Terms Modal'}
+                  className="flex h-8 w-8 items-center justify-center rounded-xl border border-[#d4af37]/30 bg-[#0a2618] text-[#f4efe6]/80 hover:text-white hover:border-[#d4af37] cursor-pointer"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* Modal Scrollable Terms Body */}
+            <div className="overflow-y-auto px-5 py-4 space-y-3">
+              {TERMS_MODAL_ITEMS[lang].map((section, idx) => (
+                <div
+                  key={idx}
+                  className="rounded-2xl border border-[#d4af37]/25 bg-[#051a10]/85 p-3.5 sm:p-4 space-y-1"
+                >
+                  <h4 className="text-xs sm:text-sm font-black text-[#d4af37]">
+                    {section.title}
+                  </h4>
+                  <p className="text-xs text-[#f4efe6]/85 leading-relaxed">
+                    {section.body}
+                  </p>
+                </div>
+              ))}
+            </div>
+
+            {/* Modal Footer Actions */}
+            <div className="flex items-center justify-end gap-2.5 border-t border-[#d4af37]/25 bg-[#051a10] px-5 py-3.5">
+              <button
+                type="button"
+                onClick={() => setShowTermsModal(false)}
+                className="rounded-xl border border-[#d4af37]/30 px-4 py-2 text-xs font-bold text-[#f4efe6]/80 hover:bg-[#0a2618] cursor-pointer"
+              >
+                {isUr ? 'بند کریں' : 'Close'}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAgreedToTerms(true);
+                  setErrorMsg('');
+                  setShowTermsModal(false);
+                }}
+                className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-[#d4af37] via-[#f3df88] to-[#d4af37] px-5 py-2 text-xs font-black text-[#051a10] shadow-lg shadow-[#d4af37]/20 hover:brightness-105 active:scale-98 cursor-pointer"
+              >
+                <CheckCircle2 className="h-4 w-4" />
+                <span>{strings.termsModalCloseBtn}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

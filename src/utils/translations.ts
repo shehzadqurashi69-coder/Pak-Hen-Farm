@@ -47,6 +47,12 @@ export const t = {
     backToSignIn: 'Back to Sign In',
     passwordsDoNotMatch: 'Passwords do not match. Please verify.',
     authAdminNote: 'Authorized administrators & staff sign in using dedicated credentials.',
+    agreeTermsLabel: 'I agree to the Pak Hen Farm Terms & Conditions',
+    agreeTermsPreview: 'Operates on Islamic Mudarabah/Musharakah principles across a 90-day care cycle.',
+    readMoreBtn: 'Read More',
+    mustAgreeTermsError: 'Please agree to the Pak Hen Farm Terms & Conditions before creating your account.',
+    termsModalHeading: 'Pak Hen Farm – Terms & Conditions (Effective Date: November 2026)',
+    termsModalCloseBtn: 'I Agree & Close',
 
     // User Dashboard
     walletBalance: 'Wallet Balance',
@@ -351,6 +357,12 @@ export const t = {
     backToSignIn: 'سائن ان پر واپس جائیں',
     passwordsDoNotMatch: 'دونوں پاس ورڈ مماثل نہیں ہیں۔',
     authAdminNote: 'ایڈمن اور اسٹاف اپنے مخصوص لاگ ان کی اسناد کے ذریعے داخل ہو سکتے ہیں۔',
+    agreeTermsLabel: 'میں پاک ہین فارم کے قواعد و ضوابط سے متفق ہوں',
+    agreeTermsPreview: 'اسلامی مضاربہ و مشارکہ اصولوں کے تحت 90 روزہ فزیکل پولٹری کیئر معاہدہ۔',
+    readMoreBtn: 'مزید پڑھیں',
+    mustAgreeTermsError: 'براہ کرم اکاؤنٹ بنانے سے پہلے پاک ہین فارم کے قواعد و ضوابط سے اتفاق کریں۔',
+    termsModalHeading: 'پاک ہین فارم – قواعد و ضوابط (تاریخِ نفاذ: نومبر 2026)',
+    termsModalCloseBtn: 'متفق ہوں اور بند کریں',
 
     // User Dashboard
     walletBalance: 'والٹ بیلنس',
@@ -611,4 +623,51 @@ export const t = {
     openTicketsTitle: 'صارفین کے پیغامات و مسائل',
     sendReplyBtn: 'جواب ارسال کریں',
   },
+};
+
+export const TERMS_MODAL_ITEMS: Record<'en' | 'ur', Array<{ title: string; body: string }>> = {
+  en: [
+    {
+      title: '1. Nature of Agreement',
+      body: 'Operates strictly on Islamic partnership principles (Mudarabah and Musharakah) for physical poultry flocks. Profit and loss are shared based on actual farm performance.',
+    },
+    {
+      title: '2. Investment Packages',
+      body: 'Available from 1 Hen (PKR 1,000) up to 10 Hens (PKR 8,000) with estimated daily returns over a 90-day operational care period.',
+    },
+    {
+      title: '3. User Accounts',
+      body: 'Users are responsible for account security and must use official active farm payment channels for deposits/withdrawals.',
+    },
+    {
+      title: '4. Referral & Milestone Rewards',
+      body: 'Standard 10% direct commission plus milestone bonuses for achieving referral targets (Target A, B, C, D).',
+    },
+    {
+      title: '5. Limitation of Liability',
+      body: 'Subject to natural agricultural and biological risks (disease, weather, mortality).',
+    },
+  ],
+  ur: [
+    {
+      title: '1. معاہدے کی نوعیت',
+      body: 'فزیکل پولٹری فلاک کے لیے مکمل طور پر اسلامی شراکت داری کے اصولوں (مضاربہ اور مشارکہ) پر کام کرتا ہے۔ نفع اور نقصان فارم کی حقیقی کارکردگی کی بنیاد پر تقسیم ہوتے ہیں۔',
+    },
+    {
+      title: '2. سرمایہ کاری پیکجز',
+      body: '1 مرغی (1,000 روپے) سے لے کر 10 مرغیوں (8,000 روپے) تک دستیاب ہیں جن پر 90 روزہ عملی دیکھ بھال کے دوران تخمینی یومیہ منافع ملتا ہے۔',
+    },
+    {
+      title: '3. صارف اکاؤنٹس',
+      body: 'صارفین اپنے اکاؤنٹ کی حفاظت کے خود ذمہ دار ہیں اور ڈپازٹس/نکلوائی کے لیے صرف سرکاری فعال فارم ادائیگی چینلز استعمال کرنے کے پابند ہیں۔',
+    },
+    {
+      title: '4. ریفرل اور مائل اسٹون انعامات',
+      body: 'معیاری 10٪ براہِ راست کمیشن کے ساتھ ریفرل اہداف (Target A, B, C, D) مکمل کرنے پر اضافی مائل اسٹون بونسز دیے جاتے ہیں۔',
+    },
+    {
+      title: '5. ذمہ داری کی حد',
+      body: 'تمام فلاک قدرتی زرعی اور حیاتیاتی خطرات (بیماری، موسمی حالات، شرحِ اموات) کے تابع ہیں۔',
+    },
+  ],
 };

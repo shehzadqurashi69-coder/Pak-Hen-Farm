@@ -73,6 +73,8 @@ export interface UserAccount {
   createdAt: string;
   lastEggCollectionAt?: string; // ISO string
   packages: PurchasedPackage[];
+  claimedMilestoneTargets?: string[]; // e.g. ['target_a', 'target_b', 'target_c', 'target_d']
+  milestoneBonusesEarned?: number; // Total extra PKR milestone bonuses credited
 }
 
 export interface FarmBanner {
@@ -146,6 +148,8 @@ export interface PaymentAccount {
   instructions?: string;
   instructionsUr?: string;
   active: boolean;
+  isActive?: boolean;
+  status?: 'active' | 'disabled' | 'inactive';
   displayOrder: number;
   createdAt: string;
 }
@@ -260,7 +264,7 @@ export interface UserAlert {
   paidAt?: string;
   paymentPendingVerification?: boolean;
   pendingTid?: string;
-  paymentMethod?: 'wallet' | 'jazzcash' | 'usdt';
+  paymentMethod?: 'wallet' | PaymentMethodType;
 }
 
 export type MedicalPaymentStatus = 'pending' | 'approved' | 'rejected';
@@ -276,7 +280,7 @@ export interface MedicalPaymentOrder {
   hensCount: number;
   perHenRate: number;
   amount: number; // Tiered total fee in PKR
-  paymentMethod: 'wallet' | 'jazzcash' | 'usdt';
+  paymentMethod: 'wallet' | PaymentMethodType;
   tid?: string; // Transaction ID
   senderName?: string;
   senderNumber?: string;

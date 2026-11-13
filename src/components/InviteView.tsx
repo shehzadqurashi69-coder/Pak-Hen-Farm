@@ -3,7 +3,11 @@ import { UserAccount } from '../types/farm';
 import { t } from '../utils/translations';
 import { subscribeToMyReferrals } from '../services/firebase';
 import {
-  Gift,
+  evaluateReferralMilestones,
+  getReferralCommissionRateForPackage,
+} from '../utils/farmRules';
+import { ReferralMilestoneBoard } from './ReferralMilestoneBoard';
+import {
   Copy,
   Check,
   Share2,
@@ -19,9 +23,10 @@ import {
 interface InviteViewProps {
   user: UserAccount;
   lang: 'en' | 'ur';
+  onUserUpdated?: (updatedUser: UserAccount) => void;
 }
 
-export const InviteView: React.FC<InviteViewProps> = ({ user, lang }) => {
+export const InviteView: React.FC<InviteViewProps> = ({ user, lang, onUserUpdated }) => {
   const strings = t[lang];
   const isUr = lang === 'ur';
 
@@ -52,10 +57,19 @@ export const InviteView: React.FC<InviteViewProps> = ({ user, lang }) => {
     window.open(`https://wa.me/?text=${encodeURIComponent(message)}`, '_blank');
   };
 
-  // Calculate total commission earned from approved referrals
+  const milestoneEval = evaluateReferralMilestones(referrals, user.claimedMilestoneTargets || []);
+  const unlockedTargetIds = milestoneEval.items
+    .filter((item) => item.isReached || item.isClaimed)
+    .map((item) => item.target.id);
+
+  // Calculate total direct commission earned from approved referrals (10% base or 15% unlocked tier)
   const totalCommissionEarned = referrals.reduce((acc, refUser) => {
     const pkgs = refUser.packages || [];
-    const earned = pkgs.reduce((sum, p) => sum + Math.round((Number(p.purchasePrice) || 0) * 0.1), 0);
+    const earned = pkgs.reduce((sum, p) => {
+      const price = Number(p.purchasePrice) || 0;
+      const rate = getReferralCommissionRateForPackage(price, p.hens, unlockedTargetIds);
+      return sum + Math.round((price * rate) / 100);
+    }, 0);
     return acc + earned;
   }, 0);
 
@@ -76,28 +90,28 @@ export const InviteView: React.FC<InviteViewProps> = ({ user, lang }) => {
           <div className="space-y-3 text-center md:text-left">
             <span className="inline-flex items-center gap-1.5 rounded-full bg-[#d4af37]/20 border border-[#d4af37]/40 px-3 py-1 text-xs font-bold text-[#f3df88]">
               <Award className="h-4 w-4" />
-              <span>{isUr ? '10٪ ریفرل کمیشن پروگرام' : '10% Auto-Commission Program'}</span>
+              <span>{isUr ? '10٪ بیس + 15٪ VIP مائل اسٹون پروگرام' : '10% Base + 15% Milestone Tiers'}</span>
             </span>
             <h3 className="text-xl sm:text-2xl font-black text-[#f4efe6]">
               {isUr ? 'دوستوں کو پولٹری فارمنگ سے جوڑیں' : 'Grow the Farm Community'}
             </h3>
             <p className="text-xs sm:text-sm text-[#f4efe6]/75 max-w-lg leading-relaxed">
               {isUr
-                ? 'اپنے دوستوں کو پاک ہین فارم پر مدعو کریں۔ جب بھی وہ کوئی فلاک پیکج خریدیں گے، آپ کو 10٪ کمیشن فوراً آپ کے والٹ میں ملے گا۔'
-                : 'Invite friends to Pak Hen Farm across Pakistan. Whenever an invited friend purchases an approved flock package, you receive a 10% auto-commission instantly credited to your wallet.'}
+                ? 'اپنے دوستوں کو پاک ہین فارم پر مدعو کریں۔ ہر منظور شدہ فلاک پیکج پر 10٪ براہِ راست کمیشن اور ہدف A–D مکمل کر کے اضافی نقد بونس و 15٪ VIP کمیشن پائیں۔'
+                : 'Invite friends to Pak Hen Farm across Pakistan. Receive a standard 10% auto-commission on every approved flock deposit, plus unlock cash milestone bonuses and 15% enhanced commissions via Targets A–D.'}
             </p>
           </div>
 
-          <div className="rounded-2xl border-2 border-[#d4af37] bg-[#051a10] p-4 text-center min-w-[200px] shadow-xl shadow-[#d4af37]/20">
+          <div className="rounded-2xl border-2 border-[#d4af37] bg-[#051a10] p-4 text-center min-w-[210px] shadow-xl shadow-[#d4af37]/20">
             <span className="text-[10px] font-bold uppercase text-[#f3df88]/80 block mb-1">
               {strings.yourReferralCode}
             </span>
             <div className="text-xl font-mono font-black text-[#d4af37] tracking-wider">
               {user.referralCode}
             </div>
-            {totalCommissionEarned > 0 && (
+            {(totalCommissionEarned > 0 || (user.milestoneBonusesEarned || 0) > 0) && (
               <div className="mt-2 pt-2 border-t border-[#d4af37]/30 text-xs text-emerald-400 font-bold">
-                +{isUr ? 'کمیشن' : 'Earned'}: Rs. {totalCommissionEarned.toLocaleString()}
+                +{isUr ? 'کمیشن و بونس' : 'Earned'}: Rs. {(totalCommissionEarned + (user.milestoneBonusesEarned || 0)).toLocaleString()}
               </div>
             )}
           </div>
@@ -116,6 +130,7 @@ export const InviteView: React.FC<InviteViewProps> = ({ user, lang }) => {
               className="flex-1 rounded-xl border border-[#d4af37]/40 bg-[#051a10] px-4 py-3 font-mono text-xs text-[#f4efe6] select-all outline-none"
             />
             <button
+              type="button"
               onClick={handleCopy}
               className="flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-[#d4af37] via-[#f3df88] to-[#d4af37] px-5 py-3 text-xs font-black text-[#051a10] hover:brightness-105 active:scale-98 transition-all cursor-pointer shadow-lg shadow-[#d4af37]/20 shrink-0"
             >
@@ -123,6 +138,7 @@ export const InviteView: React.FC<InviteViewProps> = ({ user, lang }) => {
               <span>{copied ? strings.linkCopied : strings.copyLink}</span>
             </button>
             <button
+              type="button"
               onClick={handleShareWhatsApp}
               className="flex items-center justify-center gap-2 rounded-xl bg-[#25D366] px-5 py-3 text-xs font-black text-white hover:bg-[#20ba5a] active:scale-98 transition-all cursor-pointer shadow-lg shadow-emerald-900/30 shrink-0"
             >
@@ -132,6 +148,14 @@ export const InviteView: React.FC<InviteViewProps> = ({ user, lang }) => {
           </div>
         </div>
       </div>
+
+      {/* Dynamic Milestone & Target Bonus System */}
+      <ReferralMilestoneBoard
+        user={user}
+        lang={lang}
+        onUserUpdated={onUserUpdated}
+        referralsOverride={referrals}
+      />
 
       {/* 10% Auto-Commission Rule Box */}
       <div className="rounded-2xl border border-[#d4af37]/40 bg-gradient-to-r from-[#0a2618] via-[#0d3420] to-[#0a2618] p-4 sm:p-5 shadow-lg flex items-start gap-3.5">
@@ -200,10 +224,11 @@ export const InviteView: React.FC<InviteViewProps> = ({ user, lang }) => {
                     (refUser.packages && refUser.packages.length > 0) ||
                     (refUser.activeHens && refUser.activeHens > 0);
 
-                  const earnedCommission = (refUser.packages || []).reduce(
-                    (sum, p) => sum + Math.round((Number(p.purchasePrice) || 0) * 0.1),
-                    0
-                  );
+                  const earnedCommission = (refUser.packages || []).reduce((sum, p) => {
+                    const price = Number(p.purchasePrice) || 0;
+                    const rate = getReferralCommissionRateForPackage(price, p.hens, unlockedTargetIds);
+                    return sum + Math.round((price * rate) / 100);
+                  }, 0);
 
                   const dateFormatted = refUser.createdAt
                     ? new Date(refUser.createdAt).toLocaleDateString(isUr ? 'ur-PK' : 'en-US', {

@@ -1,11 +1,11 @@
 import React, { useState } from 'react';
 import { UserAccount, EggCollectionRecord } from '../types/farm';
 import { PaymentLogo } from './PaymentLogos';
+import { ReferralMilestoneBoard } from './ReferralMilestoneBoard';
 import { apiUpdateUserProfile } from '../services/api';
 import { setCurrentUser } from '../services/storage';
 import { t } from '../utils/translations';
 import {
-  Wallet,
   ArrowLeft,
   ArrowDownRight,
   TrendingUp,
@@ -14,11 +14,9 @@ import {
   Save,
   CreditCard,
   Building2,
-  Calendar,
-  Sparkles,
-  Info,
   Loader2,
   Egg,
+  Gift,
 } from 'lucide-react';
 
 interface WalletViewProps {
@@ -195,26 +193,49 @@ export const WalletView: React.FC<WalletViewProps> = ({
             </p>
           </div>
 
-          <div className="flex sm:flex-col items-center sm:items-end justify-between sm:justify-center gap-2 pt-2 sm:pt-0 border-t sm:border-t-0 border-[#143d24]/20">
-            <div className="text-left sm:text-right">
-              <span className="text-[10px] font-bold uppercase text-[#143d24] block">
-                {isUr ? 'فعال مرغیاں:' : 'Active Flock:'}
-              </span>
-              <span className="text-base sm:text-lg font-black text-[#051a10]">
-                {user.activeHens || 0} {isUr ? 'مرغیاں' : 'Hens'}
-              </span>
+          <div className="flex sm:flex-col items-center sm:items-end justify-between sm:justify-center gap-2.5 pt-2 sm:pt-0 border-t sm:border-t-0 border-[#143d24]/20">
+            <div className="flex items-center gap-4 sm:flex-col sm:items-end sm:gap-1.5">
+              <div className="text-left sm:text-right">
+                <span className="text-[10px] font-bold uppercase text-[#143d24] block">
+                  {isUr ? 'فعال مرغیاں:' : 'Active Flock:'}
+                </span>
+                <span className="text-base sm:text-lg font-black text-[#051a10]">
+                  {user.activeHens || 0} {isUr ? 'مرغیاں' : 'Hens'}
+                </span>
+              </div>
+              <div className="text-left sm:text-right">
+                <span className="text-[10px] font-bold uppercase text-[#143d24] block">
+                  {isUr ? 'متوقع یومیہ منافع:' : 'Daily Yield:'}
+                </span>
+                <span className="text-base sm:text-lg font-black text-[#051a10]">
+                  +Rs. {dailyIncomePotential.toLocaleString()}/day
+                </span>
+              </div>
             </div>
-            <div className="text-left sm:text-right">
-              <span className="text-[10px] font-bold uppercase text-[#143d24] block">
-                {isUr ? 'متوقع یومیہ منافع:' : 'Daily Yield:'}
+
+            <button
+              type="button"
+              onClick={() => onNavigate('invite')}
+              className="inline-flex items-center gap-2 rounded-2xl bg-[#051a10] px-4 py-2.5 text-xs font-black text-[#f3df88] border border-[#f3df88]/30 shadow-lg hover:bg-[#0d3420] active:scale-95 transition-all cursor-pointer shrink-0"
+            >
+              <Gift className="h-4 w-4 text-[#f3df88]" />
+              <span>{strings.navInvite}</span>
+              <span className="rounded-md bg-[#d4af37] px-1.5 py-0.5 text-[10px] font-black text-[#051a10]">
+                10%
               </span>
-              <span className="text-base sm:text-lg font-black text-[#051a10]">
-                +Rs. {dailyIncomePotential.toLocaleString()}/day
-              </span>
-            </div>
+            </button>
           </div>
         </div>
       </div>
+
+      {/* Invite & Earn — Dynamic Milestone & Target Bonus System */}
+      <ReferralMilestoneBoard
+        user={user}
+        lang={lang}
+        onUserUpdated={onUserUpdated}
+        onOpenFullInvite={() => onNavigate('invite')}
+        compactShareBar
+      />
 
       {/* SECTION A: Account / Payment Method Update Settings */}
       <div className="rounded-3xl border border-[#d4af37]/35 bg-[#0a2618]/90 p-5 sm:p-7 shadow-xl backdrop-blur-md">

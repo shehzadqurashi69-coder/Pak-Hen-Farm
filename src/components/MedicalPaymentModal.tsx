@@ -1,18 +1,17 @@
-import React, { useState } from 'react';
-import { UserAccount, UserAlert } from '../types/farm';
-import { OFFICIAL_INFO, calculateMedicalFee } from '../utils/farmRules';
-import { apiPayMedicalFee, apiSubmitMedicalPaymentTid } from '../services/api';
+import React, { useState, useEffect } from 'react';
+import { UserAccount, UserAlert, PaymentAccount } from '../types/farm';
+import { calculateMedicalFee, filterActivePaymentMethods } from '../utils/farmRules';
+import { apiPayMedicalFee, apiSubmitMedicalPaymentTid, subscribeToPaymentMethods } from '../services/api';
+import { PaymentLogo } from './PaymentLogos';
 import { t } from '../utils/translations';
 import {
   X,
-  CreditCard,
   Wallet,
   CheckCircle2,
   AlertCircle,
   Copy,
   Check,
   ShieldCheck,
-  Percent,
 } from 'lucide-react';
 
 interface MedicalPaymentModalProps {
@@ -32,7 +31,8 @@ export const MedicalPaymentModal: React.FC<MedicalPaymentModalProps> = ({
   onClose,
   onSuccess,
 }) => {
-  const [paymentMethod, setPaymentMethod] = useState<'wallet' | 'jazzcash' | 'usdt'>('wallet');
+  const [selectedTab, setSelectedTab] = useState<'wallet' | string>('wallet');
+  const [activeAccounts, setActiveAccounts] = useState<PaymentAccount[]>([]);
   const [tid, setTid] = useState('');
   const [senderName, setSenderName] = useState(user.fullName || '');
   const [senderNumber, setSenderNumber] = useState(user.phone || '');
@@ -41,13 +41,32 @@ export const MedicalPaymentModal: React.FC<MedicalPaymentModalProps> = ({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (!isOpen) return;
+    const unsub = subscribeToPaymentMethods((methods) => {
+      const filtered = filterActivePaymentMethods(methods);
+      setActiveAccounts(filtered);
+      setSelectedTab((prev) => {
+        if (prev === 'wallet') return 'wallet';
+        if (filtered.some((a) => a.id === prev)) return prev;
+        return 'wallet';
+      });
+    });
+    return () => unsub();
+  }, [isOpen]);
+
   if (!isOpen) return null;
 
+  const selectedAccount = activeAccounts.find((a) => a.id === selectedTab) || null;
+
   // Calculate flock in this shed
-  const userHensInShed = alert.hensCount || (user.packages || []).reduce((acc, p) => {
-    const pShed = p.shedId || 'Shed-101';
-    return pShed === alert.shedId && p.active && p.hens > 0 ? acc + p.hens : acc;
-  }, 0) || 1;
+  const userHensInShed =
+    alert.hensCount ||
+    (user.packages || []).reduce((acc, p) => {
+      const pShed = p.shedId || 'Shed-101';
+      return pShed === alert.shedId && p.active && p.hens > 0 ? acc + p.hens : acc;
+    }, 0) ||
+    1;
 
   const feeCalc = calculateMedicalFee(userHensInShed);
   const requiredAmount = alert.medicalFeeRequired || alert.medicalFeeAmount || feeCalc.totalFee;
@@ -83,6 +102,14 @@ export const MedicalPaymentModal: React.FC<MedicalPaymentModalProps> = ({
   const handleSubmitTid = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
+    if (!selectedAccount) {
+      setErrorMsg(
+        language === 'ur'
+          ? 'منتخب کردہ ادائیگی اکاؤنٹ دستیاب نہیں ہے۔ براہ کرم فعال اکاؤنٹ منتخب کریں۔'
+          : 'Selected payment account is no longer active. Please pick an active method.'
+      );
+      return;
+    }
     if (!tid.trim()) {
       setErrorMsg(language === 'ur' ? 'براہ کرم ٹرانزیکشن آئی ڈی (TID) درج کریں۔' : 'Please enter Transaction ID (TID)');
       return;
@@ -100,7 +127,7 @@ export const MedicalPaymentModal: React.FC<MedicalPaymentModalProps> = ({
         hensCount: userHensInShed,
         perHenRate: feeCalc.perHenRate,
         amount: requiredAmount,
-        paymentMethod: paymentMethod === 'jazzcash' ? 'jazzcash' : 'usdt',
+        paymentMethod: selectedAccount.type,
         tid: tid.trim(),
         senderName: senderName.trim(),
         senderNumber: senderNumber.trim(),
@@ -123,8 +150,10 @@ export const MedicalPaymentModal: React.FC<MedicalPaymentModalProps> = ({
       <div className="relative w-full max-w-lg bg-gradient-to-b from-[#082215] to-[#03130c] border border-amber-500/30 rounded-2xl p-5 sm:p-6 shadow-2xl overflow-y-auto max-h-[92vh]">
         {/* Close Button */}
         <button
+          type="button"
           onClick={onClose}
-          className="absolute top-4 right-4 p-1.5 rounded-lg text-amber-200/60 hover:text-amber-200 hover:bg-amber-500/10 transition-colors"
+          aria-label="Close modal"
+          className="absolute top-4 right-4 p-1.5 rounded-lg text-amber-200/60 hover:text-amber-200 hover:bg-amber-500/10 transition-colors cursor-pointer"
         >
           <X className="w-5 h-5" />
         </button>
@@ -179,13 +208,13 @@ export const MedicalPaymentModal: React.FC<MedicalPaymentModalProps> = ({
           </div>
         </div>
 
-        {/* Payment Method Selector Tabs */}
-        <div className="flex rounded-xl bg-[#04120a] p-1 border border-amber-500/20 mb-4 gap-1">
+        {/* Dynamic Payment Method Selector Tabs (Wallet + Strictly Active Admin Accounts) */}
+        <div className="flex flex-wrap rounded-xl bg-[#04120a] p-1 border border-amber-500/20 mb-4 gap-1">
           <button
             type="button"
-            onClick={() => setPaymentMethod('wallet')}
-            className={`flex-1 py-2 px-2.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
-              paymentMethod === 'wallet'
+            onClick={() => setSelectedTab('wallet')}
+            className={`flex-1 min-w-[90px] py-2 px-2.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+              selectedTab === 'wallet'
                 ? 'bg-amber-500 text-[#04140d] shadow-md'
                 : 'text-amber-200/70 hover:text-amber-200'
             }`}
@@ -194,37 +223,24 @@ export const MedicalPaymentModal: React.FC<MedicalPaymentModalProps> = ({
             <span>{language === 'ur' ? 'والٹ بیلنس' : 'Wallet'}</span>
           </button>
 
-          <button
-            type="button"
-            onClick={() => setPaymentMethod('jazzcash')}
-            className={`flex-1 py-2 px-2.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
-              paymentMethod === 'jazzcash'
-                ? 'bg-amber-500 text-[#04140d] shadow-md'
-                : 'text-amber-200/70 hover:text-amber-200'
-            }`}
-          >
-            <div className="w-4 h-4 rounded bg-white p-0.5 flex items-center justify-center shrink-0 shadow-sm">
-              <img
-                src="/assets/aistudio/download__2__550d514b.png"
-                alt="JazzCash"
-                className="w-full h-full object-contain"
-              />
-            </div>
-            <span>JazzCash</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setPaymentMethod('usdt')}
-            className={`flex-1 py-2 px-2.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
-              paymentMethod === 'usdt'
-                ? 'bg-amber-500 text-[#04140d] shadow-md'
-                : 'text-amber-200/70 hover:text-amber-200'
-            }`}
-          >
-            <Percent className="w-3.5 h-3.5" />
-            <span>USDT (TRC20)</span>
-          </button>
+          {activeAccounts.map((pm) => (
+            <button
+              key={pm.id}
+              type="button"
+              onClick={() => {
+                setSelectedTab(pm.id);
+                setErrorMsg(null);
+              }}
+              className={`flex-1 min-w-[100px] py-2 px-2.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                selectedTab === pm.id
+                  ? 'bg-amber-500 text-[#04140d] shadow-md'
+                  : 'text-amber-200/70 hover:text-amber-200'
+              }`}
+            >
+              <PaymentLogo method={pm.type} size="sm" />
+              <span className="truncate">{language === 'ur' && pm.titleUr ? pm.titleUr : pm.title}</span>
+            </button>
+          ))}
         </div>
 
         {/* Success / Error Messages */}
@@ -243,7 +259,7 @@ export const MedicalPaymentModal: React.FC<MedicalPaymentModalProps> = ({
         )}
 
         {/* Tab 1: Pay from Wallet */}
-        {paymentMethod === 'wallet' && (
+        {selectedTab === 'wallet' && (
           <div className="space-y-4">
             <div className="p-3.5 rounded-xl bg-[#051a10] border border-amber-500/15 text-xs">
               <div className="flex items-center justify-between mb-1">
@@ -264,13 +280,16 @@ export const MedicalPaymentModal: React.FC<MedicalPaymentModalProps> = ({
 
             {isWalletSufficient ? (
               <button
+                type="button"
                 onClick={handleWalletPay}
                 disabled={isSubmitting}
-                className="w-full py-3 px-4 rounded-xl font-bold text-sm bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-[#04140d] shadow-lg transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                className="w-full py-3 px-4 rounded-xl font-bold text-sm bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-[#04140d] shadow-lg transition-all flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
               >
                 <CheckCircle2 className="w-4 h-4" />
                 {isSubmitting
-                  ? (language === 'ur' ? 'ادائیگی جاری ہے...' : 'Processing...')
+                  ? language === 'ur'
+                    ? 'ادائیگی جاری ہے...'
+                    : 'Processing...'
                   : t[language].payFromWalletBtn.replace('{amount}', requiredAmount.toLocaleString())}
               </button>
             ) : (
@@ -280,66 +299,71 @@ export const MedicalPaymentModal: React.FC<MedicalPaymentModalProps> = ({
                     .replace('{balance}', user.walletBalance.toLocaleString())
                     .replace('{required}', requiredAmount.toLocaleString())}
                 </div>
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setPaymentMethod('jazzcash')}
-                    className="flex-1 py-2.5 px-3 rounded-xl text-xs font-bold bg-[#072417] hover:bg-[#0c3120] text-amber-300 border border-amber-500/30 transition-all text-center"
-                  >
-                    Pay via JazzCash →
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setPaymentMethod('usdt')}
-                    className="flex-1 py-2.5 px-3 rounded-xl text-xs font-bold bg-[#072417] hover:bg-[#0c3120] text-amber-300 border border-amber-500/30 transition-all text-center"
-                  >
-                    Pay via USDT →
-                  </button>
-                </div>
+                {activeAccounts.length > 0 ? (
+                  <div className="flex flex-wrap gap-2">
+                    {activeAccounts.map((pm) => (
+                      <button
+                        key={pm.id}
+                        type="button"
+                        onClick={() => setSelectedTab(pm.id)}
+                        className="flex-1 min-w-[120px] py-2.5 px-3 rounded-xl text-xs font-bold bg-[#072417] hover:bg-[#0c3120] text-amber-300 border border-amber-500/30 transition-all text-center cursor-pointer"
+                      >
+                        Pay via {pm.title} →
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="p-3 rounded-xl bg-rose-950/40 border border-rose-500/30 text-rose-200 text-xs text-center">
+                    {language === 'ur'
+                      ? 'اس وقت ایڈمن کی طرف سے کوئی بیرونی پیمنٹ اکاؤنٹ فعال نہیں ہے۔'
+                      : 'No external payment accounts are currently active. Please contact Admin.'}
+                  </div>
+                )}
               </div>
             )}
           </div>
         )}
 
-        {/* Tab 2: JazzCash Official Account */}
-        {paymentMethod === 'jazzcash' && (
+        {/* Dynamic Active Admin Payment Account Form */}
+        {selectedTab !== 'wallet' && selectedAccount && (
           <form onSubmit={handleSubmitTid} className="space-y-4">
             <div className="p-3.5 rounded-xl bg-[#061b11] border border-amber-500/25 space-y-2.5 text-xs">
               <div className="font-bold text-amber-300 text-sm flex items-center gap-2">
-                <div className="w-5 h-5 rounded bg-white p-0.5 flex items-center justify-center shrink-0 shadow-sm">
-                  <img
-                    src="/assets/aistudio/download__2__550d514b.png"
-                    alt="JazzCash"
-                    className="w-full h-full object-contain"
-                  />
-                </div>
-                <span>{t[language].officialJazzCashInfo}</span>
+                <PaymentLogo method={selectedAccount.type} size="sm" />
+                <span>{language === 'ur' && selectedAccount.titleUr ? selectedAccount.titleUr : selectedAccount.title}</span>
               </div>
-              <div className="flex items-center justify-between bg-[#03130c] p-2.5 rounded-lg border border-amber-500/15">
-                <div>
+              <div className="flex items-center justify-between gap-2 bg-[#03130c] p-2.5 rounded-lg border border-amber-500/15">
+                <div className="min-w-0">
                   <div className="text-[10px] text-amber-200/60">Account Title</div>
-                  <div className="font-bold text-amber-200">{OFFICIAL_INFO.jazzCashAccountTitle}</div>
+                  <div className="font-bold text-amber-200 truncate">{selectedAccount.accountTitle}</div>
                 </div>
-                <div>
-                  <div className="text-[10px] text-amber-200/60">JazzCash Mobile Number</div>
-                  <div className="font-bold text-emerald-400">{OFFICIAL_INFO.jazzCashAccountNumber}</div>
+                <div className="min-w-0 flex-1 text-right">
+                  <div className="text-[10px] text-amber-200/60">Account Number / Address</div>
+                  <div className="font-bold text-emerald-400 font-mono break-all select-all">
+                    {selectedAccount.accountNumber}
+                  </div>
                 </div>
                 <button
                   type="button"
-                  onClick={() => handleCopy(OFFICIAL_INFO.jazzCashAccountNumber, 'jazzcash')}
-                  className="p-1.5 rounded-lg bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 transition-colors"
+                  onClick={() => handleCopy(selectedAccount.accountNumber, selectedAccount.id)}
+                  aria-label="Copy payment account number"
+                  className="p-1.5 rounded-lg bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 transition-colors shrink-0 cursor-pointer"
                 >
-                  {copiedField === 'jazzcash' ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                  {copiedField === selectedAccount.id ? (
+                    <Check className="w-4 h-4 text-emerald-400" />
+                  ) : (
+                    <Copy className="w-4 h-4" />
+                  )}
                 </button>
               </div>
               <div className="text-[11px] text-amber-200/70">
-                Send <strong>Rs. {requiredAmount.toLocaleString()}</strong> to the official JazzCash account above, then enter the Transaction ID (TID) below.
+                Send <strong>Rs. {requiredAmount.toLocaleString()}</strong> to this official account, then enter your Transaction ID (TID) below.
               </div>
             </div>
 
             <div>
               <label className="block text-xs font-medium text-amber-200/80 mb-1">
-                JazzCash Transaction ID (TID) *
+                Transaction ID (TID) / Hash *
               </label>
               <input
                 type="text"
@@ -381,64 +405,13 @@ export const MedicalPaymentModal: React.FC<MedicalPaymentModalProps> = ({
             <button
               type="submit"
               disabled={isSubmitting}
-              className="w-full py-3 px-4 rounded-xl font-bold text-sm bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-[#04140d] shadow-lg transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+              className="w-full py-3 px-4 rounded-xl font-bold text-sm bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-[#04140d] shadow-lg transition-all flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
             >
               <CheckCircle2 className="w-4 h-4" />
               {isSubmitting
-                ? (language === 'ur' ? 'جمع کیا جا رہا ہے...' : 'Submitting...')
-                : `${t[language].submitMedicalTidBtn} (Rs. ${requiredAmount.toLocaleString()})`}
-            </button>
-          </form>
-        )}
-
-        {/* Tab 3: USDT (TRC20) Official Wallet */}
-        {paymentMethod === 'usdt' && (
-          <form onSubmit={handleSubmitTid} className="space-y-4">
-            <div className="p-3.5 rounded-xl bg-[#061b11] border border-amber-500/25 space-y-2.5 text-xs">
-              <div className="font-bold text-amber-300 text-sm flex items-center gap-2">
-                <span>🪙 {t[language].officialUsdtInfo}</span>
-              </div>
-              <div className="bg-[#03130c] p-2.5 rounded-lg border border-amber-500/15">
-                <div className="text-[10px] text-amber-200/60 mb-0.5">TRON (TRC20) Address:</div>
-                <div className="font-mono text-xs text-amber-300 break-all select-all">
-                  {OFFICIAL_INFO.usdtTrc20Address}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => handleCopy(OFFICIAL_INFO.usdtTrc20Address, 'usdt')}
-                  className="mt-2 w-full py-1.5 px-3 rounded-lg bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 transition-colors flex items-center justify-center gap-1.5 font-medium text-xs"
-                >
-                  {copiedField === 'usdt' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                  <span>{copiedField === 'usdt' ? 'Copied!' : 'Copy TRC20 Address'}</span>
-                </button>
-              </div>
-              <div className="text-[11px] text-amber-200/70">
-                Amount: <strong>Rs. {requiredAmount.toLocaleString()}</strong> (~{(requiredAmount / 280).toFixed(2)} USDT at Rs. 280/USDT).
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-amber-200/80 mb-1">
-                USDT (TRC20) Transaction Hash (TxID) *
-              </label>
-              <input
-                type="text"
-                required
-                value={tid}
-                onChange={(e) => setTid(e.target.value)}
-                placeholder="Paste TRON TxID Hash"
-                className="w-full px-3.5 py-2.5 rounded-xl bg-[#03130c] border border-amber-500/30 text-amber-200 font-mono text-xs focus:outline-none focus:border-amber-400"
-              />
-            </div>
-
-            <button
-              type="submit"
-              disabled={isSubmitting}
-              className="w-full py-3 px-4 rounded-xl font-bold text-sm bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-[#04140d] shadow-lg transition-all flex items-center justify-center gap-2 disabled:opacity-50"
-            >
-              <CheckCircle2 className="w-4 h-4" />
-              {isSubmitting
-                ? (language === 'ur' ? 'جمع کیا جا رہا ہے...' : 'Submitting...')
+                ? language === 'ur'
+                  ? 'جمع کیا جا رہا ہے...'
+                  : 'Submitting...'
                 : `${t[language].submitMedicalTidBtn} (Rs. ${requiredAmount.toLocaleString()})`}
             </button>
           </form>
@@ -447,3 +420,4 @@ export const MedicalPaymentModal: React.FC<MedicalPaymentModalProps> = ({
     </div>
   );
 };
+

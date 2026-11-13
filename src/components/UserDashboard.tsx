@@ -269,32 +269,48 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
           6. Est. Daily Income (Estimated earnings calculation)
          ========================================================================= */}
       <div className="grid grid-cols-2 lg:grid-cols-3 gap-2.5 sm:gap-4">
-        {/* 1. My Wallet (Showing current balance & quick status) */}
-        <button
-          onClick={() => onNavigate('wallet')}
-          className="group relative overflow-hidden rounded-3xl p-3.5 sm:p-5 bg-gradient-to-r from-[#d4af37] via-[#f3df88] to-[#b38f20] text-[#051a10] border-2 border-[#fff2b2] shadow-xl shadow-[#d4af37]/35 hover:shadow-2xl hover:shadow-[#d4af37]/50 hover:brightness-105 active:scale-[0.98] transition-all cursor-pointer flex flex-col justify-between min-h-[135px] sm:min-h-[155px] text-left min-w-0"
+        {/* 1. My Wallet (Showing current balance & integrated Invite & Earn action) */}
+        <div
+          className="group relative overflow-hidden rounded-3xl p-3.5 sm:p-5 bg-gradient-to-r from-[#d4af37] via-[#f3df88] to-[#b38f20] text-[#051a10] border-2 border-[#fff2b2] shadow-xl shadow-[#d4af37]/35 hover:shadow-2xl hover:shadow-[#d4af37]/50 transition-all flex flex-col justify-between min-h-[135px] sm:min-h-[155px] text-left min-w-0"
         >
-          <div className="w-full">
+          <button
+            type="button"
+            onClick={() => onNavigate('wallet')}
+            aria-label={isUr ? 'میرا والٹ کھولیں' : 'Open My Wallet'}
+            className="w-full text-left cursor-pointer focus:outline-none group/wallet"
+          >
             <div className="flex items-center justify-between mb-2">
               <span className="text-[10px] sm:text-xs font-black uppercase text-[#143d24] tracking-wider truncate">
                 {strings.walletBalance}
               </span>
-              <div className="flex h-7 w-7 sm:h-9 sm:w-9 shrink-0 items-center justify-center rounded-xl bg-[#051a10] text-[#f3df88] shadow-md shadow-[#051a10]/40 group-hover:scale-110 transition-transform">
+              <div className="flex h-7 w-7 sm:h-9 sm:w-9 shrink-0 items-center justify-center rounded-xl bg-[#051a10] text-[#f3df88] shadow-md shadow-[#051a10]/40 group-hover/wallet:scale-110 transition-transform">
                 <Wallet className="h-4 w-4 sm:h-4.5 sm:w-4.5" />
               </div>
             </div>
             <div className={`text-lg sm:text-2xl lg:text-3xl font-black font-mono tracking-tight break-words ${user.walletBalance < 0 ? 'text-rose-900' : 'text-[#051a10]'}`}>
               {user.walletBalance < 0 ? `-Rs. ${Math.abs(user.walletBalance).toLocaleString()}` : `Rs. ${user.walletBalance.toLocaleString()}`}
             </div>
+          </button>
+          <div className="mt-2.5 flex flex-wrap items-center justify-between gap-1.5 text-[11px] w-full font-bold text-[#143d24]">
+            <button
+              type="button"
+              onClick={() => onNavigate('wallet')}
+              className="inline-flex items-center gap-1 truncate cursor-pointer hover:text-[#051a10] transition-colors min-w-0"
+            >
+              <span className={`h-2 w-2 shrink-0 rounded-full ${user.walletBalance < 0 ? 'bg-rose-700 animate-pulse' : 'bg-emerald-800'}`} />
+              <span className="truncate">{user.walletBalance < 0 ? (isUr ? 'منفی بیلنس' : 'Due Balance') : (isUr ? 'والٹ دیکھیں' : 'Wallet')}</span>
+              <span className="text-[#051a10] font-black text-xs shrink-0">→</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onNavigate('invite')}
+              className="inline-flex items-center gap-1 rounded-xl bg-[#051a10] px-2.5 py-1.5 text-[10px] sm:text-[11px] font-black text-[#f3df88] shadow-md shadow-[#051a10]/30 hover:bg-[#0d3420] active:scale-95 transition-all cursor-pointer shrink-0 border border-[#f3df88]/30 whitespace-nowrap"
+            >
+              <Gift className="h-3 w-3 sm:h-3.5 sm:w-3.5 shrink-0 text-[#f3df88]" />
+              <span>{strings.navInvite}</span>
+            </button>
           </div>
-          <div className="mt-2.5 flex items-center justify-between gap-1 text-[11px] w-full font-bold text-[#143d24]">
-            <span className="inline-flex items-center gap-1 truncate">
-              <span className={`h-2 w-2 rounded-full ${user.walletBalance < 0 ? 'bg-rose-700 animate-pulse' : 'bg-emerald-800'}`} />
-              <span className="truncate">{user.walletBalance < 0 ? (isUr ? 'منفی بیلنس • ایڈجسٹمنٹ' : 'Due Balance') : (isUr ? 'فعال اور دستیاب' : 'Active Balance')}</span>
-            </span>
-            <span className="text-[#051a10] font-black text-xs shrink-0 group-hover:translate-x-1 transition-transform">→</span>
-          </div>
-        </button>
+        </div>
 
         {/* 2. My Profile (Account info & settings) */}
         <button
@@ -566,9 +582,9 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
         </div>
       </div>
 
-      {/* Requirement 6: Persistent Floating Quick-Access Navigation Bar (Farm Inbox, Invite & Earn, Help / SOS) */}
+      {/* Persistent Floating Quick-Access Navigation Bar (Farm Inbox & Help / SOS) */}
       <div className="sticky bottom-3 z-40 w-full max-w-2xl mx-auto pt-2 px-1">
-        <div className="grid grid-cols-3 gap-2 sm:gap-3 p-2 rounded-2xl border-2 border-[#d4af37]/60 bg-[#051a10]/95 backdrop-blur-xl shadow-2xl shadow-black/90">
+        <div className="grid grid-cols-2 gap-2 sm:gap-3 p-2 rounded-2xl border-2 border-[#d4af37]/60 bg-[#051a10]/95 backdrop-blur-xl shadow-2xl shadow-black/90">
           {/* Dedicated Farm Inbox Card with Live Unread Badge */}
           <button
             onClick={() => onNavigate('notifications')}
@@ -597,27 +613,6 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
             )}
             <span className="sm:hidden text-[11px] font-bold text-[#f4efe6] truncate">
               {strings.navInbox}
-            </span>
-          </button>
-
-          {/* Invite & Earn */}
-          <button
-            onClick={() => onNavigate('invite')}
-            className="flex items-center justify-center sm:justify-start gap-2 rounded-xl border border-[#d4af37]/40 bg-gradient-to-r from-[#0a2618] to-[#072013] p-2.5 sm:p-3 text-left hover:border-[#d4af37] hover:bg-[#0f3422] transition-all cursor-pointer active:scale-95 group shadow-md min-w-0"
-          >
-            <div className="flex h-8 w-8 sm:h-9 sm:w-9 shrink-0 items-center justify-center rounded-lg bg-[#d4af37]/20 border border-[#d4af37]/40 text-[#f3df88] group-hover:scale-105 transition-transform">
-              <Gift className="h-4 w-4" />
-            </div>
-            <div className="min-w-0 hidden sm:block">
-              <span className="text-xs sm:text-sm font-bold text-[#f4efe6] block truncate">
-                {strings.navInvite}
-              </span>
-              <span className="text-[10px] text-[#f4efe6]/60 block truncate">
-                {isUr ? 'کمائیں' : 'Refer & Earn'}
-              </span>
-            </div>
-            <span className="sm:hidden text-[11px] font-bold text-[#f4efe6] truncate">
-              {strings.navInvite}
             </span>
           </button>
 

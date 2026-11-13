@@ -27,13 +27,20 @@ import {
   isPackageActive,
   getPackageExpiryDetails,
   syncUserPackagesExpiry,
+  isPaymentAccountActive,
+  filterActivePaymentMethods,
+  validateMediaUploadFile,
+  MAX_MEDIA_UPLOAD_BYTES,
   PACKAGE_VALIDITY_DAYS,
   INITIAL_SHEDS,
   EGG_PRICE_PKR,
   MIN_WITHDRAWAL_PKR,
   MAX_WITHDRAWAL_PKR,
+  MILESTONE_TARGETS,
+  evaluateReferralMilestones,
+  getReferralCommissionRateForPackage,
 } from './farmRules';
-import { PurchasedPackage, FarmShed, UserAccount } from '../types/farm';
+import { PurchasedPackage, FarmShed, UserAccount, PaymentAccount } from '../types/farm';
 
 test('accumulateHens adds new package hens to existing hens and never overwrites', () => {
   assert.equal(accumulateHens(0, 1), 1);
@@ -692,3 +699,181 @@ test('90-Day Package Expiry: syncUserPackagesExpiry deactivates expired packages
   const dailyIncome = syncResult.updatedUser.activeHens * 30;
   assert.equal(dailyIncome, 60);
 });
+
+test('Strict Payment Method Filtering: only explicitly active accounts are returned and zero fallbacks exist', () => {
+  const basePm: PaymentAccount = {
+    id: 'pm-1',
+    type: 'jazzcash',
+    title: 'JazzCash Official',
+    accountTitle: 'Farm Official',
+    accountNumber: '03001112223',
+    active: true,
+    isActive: true,
+    status: 'active',
+    displayOrder: 2,
+    createdAt: '2026-11-01T00:00:00Z',
+  };
+
+  const disabledPm: PaymentAccount = {
+    ...basePm,
+    id: 'pm-disabled',
+    title: 'Disabled Bank',
+    accountNumber: '0101010101',
+    active: false,
+    isActive: false,
+    status: 'disabled',
+    displayOrder: 1,
+  };
+
+  const mismatchedStatusPm: PaymentAccount = {
+    ...basePm,
+    id: 'pm-status-disabled',
+    title: 'Status Disabled',
+    active: true,
+    isActive: true,
+    status: 'disabled',
+  };
+
+  const missingNumberPm: PaymentAccount = {
+    ...basePm,
+    id: 'pm-empty-num',
+    accountNumber: '   ',
+  };
+
+  const legacyActivePm: PaymentAccount = {
+    id: 'pm-legacy',
+    type: 'easypaisa',
+    title: 'Easypaisa Admin',
+    accountTitle: 'Admin Name',
+    accountNumber: '03459988776',
+    active: true,
+    displayOrder: 1,
+    createdAt: '2026-11-01T00:00:00Z',
+  };
+
+  assert.equal(isPaymentAccountActive(basePm), true);
+  assert.equal(isPaymentAccountActive(legacyActivePm), true);
+  assert.equal(isPaymentAccountActive(disabledPm), false);
+  assert.equal(isPaymentAccountActive(mismatchedStatusPm), false);
+  assert.equal(isPaymentAccountActive(missingNumberPm), false);
+
+  // Strictly filters out disabled and empty-number accounts, preserving displayOrder
+  const filtered = filterActivePaymentMethods([basePm, disabledPm, mismatchedStatusPm, missingNumberPm, legacyActivePm]);
+  assert.equal(filtered.length, 2);
+  assert.equal(filtered[0].id, 'pm-legacy');
+  assert.equal(filtered[1].id, 'pm-1');
+
+  // When all accounts are disabled or array is empty, strictly return [] with NO mock accounts
+  assert.deepEqual(filterActivePaymentMethods([disabledPm, mismatchedStatusPm]), []);
+  assert.deepEqual(filterActivePaymentMethods([]), []);
+  assert.deepEqual(filterActivePaymentMethods(null), []);
+});
+
+test('validateMediaUploadFile strictly validates 50MB size limit and supported video/photo formats', () => {
+  assert.equal(MAX_MEDIA_UPLOAD_BYTES, 50 * 1024 * 1024);
+
+  // Valid 49MB MP4 video passes
+  assert.equal(
+    validateMediaUploadFile({ name: 'shed_tour.mp4', type: 'video/mp4', size: 49 * 1024 * 1024 }, 'video').valid,
+    true
+  );
+
+  // Exact 50MB passes
+  assert.equal(
+    validateMediaUploadFile({ name: 'exact50.mp4', type: 'video/mp4', size: MAX_MEDIA_UPLOAD_BYTES }, 'video').valid,
+    true
+  );
+
+  // Over 50MB (50MB + 1 byte) fails
+  const oversized = validateMediaUploadFile({ name: 'huge.mp4', type: 'video/mp4', size: MAX_MEDIA_UPLOAD_BYTES + 1 }, 'video');
+  assert.equal(oversized.valid, false);
+  assert.match(oversized.error || '', /50MB/);
+
+  // Empty 0-byte file fails
+  assert.equal(
+    validateMediaUploadFile({ name: 'empty.mp4', type: 'video/mp4', size: 0 }, 'video').valid,
+    false
+  );
+
+  // Non-video file rejected when expecting video
+  assert.equal(
+    validateMediaUploadFile({ name: 'script.exe', type: 'application/octet-stream', size: 1024 }, 'video').valid,
+    false
+  );
+});
+
+test('Referral Milestone System: Targets A, B, C, D track unique referrals and unlock exact bonuses & 15% commission', () => {
+  assert.equal(MILESTONE_TARGETS.length, 4);
+
+  const makeRef = (id: string, price: number, hens: number) => ({
+    id,
+    packages: [
+      {
+        id: `pkg-${id}`,
+        packageId: `pkg-${hens}`,
+        hens,
+        purchasePrice: price,
+        purchasedAt: '2026-11-01T00:00:00Z',
+        approvedAt: '2026-11-01T00:00:00Z',
+        expiresAt: '2027-01-30T00:00:00Z',
+        tid: `tid-${id}`,
+        active: true,
+      },
+    ],
+  });
+
+  // 1 user buying 10 x Rs. 1,000 packages counts as ONLY 1 unique referred person toward Target A (1/10)
+  const singleMultiBuyer = {
+    id: 'ref-single',
+    packages: Array.from({ length: 10 }, (_, idx) => makeRef(`s-${idx}`, 1000, 1).packages[0]),
+  };
+  const evalSingle = evaluateReferralMilestones([singleMultiBuyer], []);
+  const targetAItemSingle = evalSingle.items.find((i) => i.target.id === 'target_a')!;
+  assert.equal(targetAItemSingle.completedCount, 1);
+  assert.equal(targetAItemSingle.cappedCount, 1);
+  assert.equal(targetAItemSingle.isReached, false);
+  assert.equal(evalSingle.pendingBonusTotal, 0);
+
+  // Target A: 10 unique referrals buying Rs. 1,000 (1 Hen) -> unlocks +Rs. 1,000 bonus
+  const tenStarterRefs = Array.from({ length: 10 }, (_, i) => makeRef(`u-a-${i}`, 1000, 1));
+  const evalA = evaluateReferralMilestones(tenStarterRefs, []);
+  const itemA = evalA.items.find((i) => i.target.id === 'target_a')!;
+  assert.equal(itemA.completedCount, 10);
+  assert.equal(itemA.isReached, true);
+  assert.equal(itemA.isClaimable, true);
+  assert.equal(evalA.pendingBonusTotal, 1000);
+
+  // Already claimed Target A is never double-credited
+  const evalAClaimed = evaluateReferralMilestones(tenStarterRefs, ['target_a']);
+  assert.equal(evalAClaimed.newlyUnlockedTargets.length, 0);
+  assert.equal(evalAClaimed.pendingBonusTotal, 0);
+
+  // Target B: 10 unique referrals buying Rs. 2,700 (3 Hens) -> unlocks +Rs. 2,700 bonus
+  const tenGrowthRefs = Array.from({ length: 10 }, (_, i) => makeRef(`u-b-${i}`, 2700, 3));
+  const evalB = evaluateReferralMilestones(tenGrowthRefs, []);
+  assert.equal(evalB.items.find((i) => i.target.id === 'target_b')?.isReached, true);
+  assert.equal(evalB.pendingBonusTotal, 2700);
+
+  // Target C: 5 unique referrals buying Rs. 4,000 (5 Hens) -> unlocks 15% commission & Rs. 1,000 catch-up bonus
+  const fiveGoldRefs = Array.from({ length: 5 }, (_, i) => makeRef(`u-c-${i}`, 4000, 5));
+  const evalC = evaluateReferralMilestones(fiveGoldRefs, []);
+  assert.equal(evalC.items.find((i) => i.target.id === 'target_c')?.isReached, true);
+  assert.equal(evalC.unlockedCommissionRateC, 15);
+  assert.equal(evalC.pendingBonusTotal, 1000);
+  assert.equal(getReferralCommissionRateForPackage(4000, 5, ['target_c']), 15);
+  assert.equal(calculateReferralCommission(4000, 15), 600);
+
+  // Target D: 10 unique referrals buying Rs. 8,000 (10 Hens) -> unlocks 15% high-tier commission & Rs. 4,000 reward
+  const tenVipRefs = Array.from({ length: 10 }, (_, i) => makeRef(`u-d-${i}`, 8000, 10));
+  const evalD = evaluateReferralMilestones(tenVipRefs, []);
+  assert.equal(evalD.items.find((i) => i.target.id === 'target_d')?.isReached, true);
+  assert.equal(evalD.unlockedCommissionRateD, 15);
+  assert.equal(evalD.pendingBonusTotal, 4000);
+  assert.equal(getReferralCommissionRateForPackage(8000, 10, ['target_d']), 15);
+  assert.equal(calculateReferralCommission(8000, 15), 1200);
+
+  // Non-target package still uses base 10%
+  assert.equal(getReferralCommissionRateForPackage(1800, 2, ['target_c', 'target_d']), 10);
+});
+
+
