@@ -39,6 +39,10 @@ import {
   MILESTONE_TARGETS,
   evaluateReferralMilestones,
   getReferralCommissionRateForPackage,
+  mergeAllSheds,
+  getUserActiveHensByShed,
+  calculateMultiShedCollectionYield,
+  aggregateGlobalStatsFromSheds,
 } from './farmRules';
 import { PurchasedPackage, FarmShed, UserAccount, PaymentAccount } from '../types/farm';
 
@@ -875,5 +879,262 @@ test('Referral Milestone System: Targets A, B, C, D track unique referrals and u
   // Non-target package still uses base 10%
   assert.equal(getReferralCommissionRateForPackage(1800, 2, ['target_c', 'target_d']), 10);
 });
+
+test('Part 1 Benchmark: Shed-101 with 5,000 hens & 50 cracked eggs deducts 10 eggs (Rs. 300) for 1,000-hen user and 5 eggs (Rs. 150) for 500-hen user', () => {
+  const now = new Date('2026-11-10T10:00:00Z');
+  const sheds: FarmShed[] = mergeAllSheds([
+    {
+      id: 'Shed-101',
+      nameEn: 'Shed-101 (Alpha Flock)',
+      nameUr: 'شیڈ-101',
+      capacity: 5000,
+      totalHens: 5000,
+      dailyEggCollection: 5000,
+      crackedEggsCount: 50,
+      netFreshEggs: 4950,
+      mortalityCount: 0,
+      crackedEggRate: 1,
+      hasSicknessAlert: false,
+      lastUpdated: now.toISOString(),
+    },
+  ]);
+
+  const investor1000: Pick<UserAccount, 'activeHens' | 'packages'> = {
+    activeHens: 1000,
+    packages: [
+      {
+        id: 'p-1000',
+        packageId: 'pkg-vip',
+        hens: 1000,
+        purchasePrice: 800000,
+        purchasedAt: '2026-11-01T00:00:00Z',
+        approvedAt: '2026-11-01T00:00:00Z',
+        expiresAt: '2027-01-30T00:00:00Z',
+        tid: 'T1',
+        active: true,
+        shedId: 'Shed-101',
+      },
+    ],
+  };
+
+  const investor500: Pick<UserAccount, 'activeHens' | 'packages'> = {
+    activeHens: 500,
+    packages: [
+      {
+        id: 'p-500',
+        packageId: 'pkg-vip',
+        hens: 500,
+        purchasePrice: 400000,
+        purchasedAt: '2026-11-01T00:00:00Z',
+        approvedAt: '2026-11-01T00:00:00Z',
+        expiresAt: '2027-01-30T00:00:00Z',
+        tid: 'T2',
+        active: true,
+        shedId: 'Shed-101',
+      },
+    ],
+  };
+
+  // Investor with 1,000 hens in Shed-101 -> 10 cracked eggs loss = Rs. 300 -> Rs. 29,700 net
+  const res1000 = calculateMultiShedCollectionYield(investor1000, sheds, now);
+  assert.equal(res1000.normalIncome, 30000);
+  assert.equal(res1000.totalCrackedEggsLost, 10);
+  assert.equal(res1000.userShareOfLoss, 300);
+  assert.equal(res1000.finalWalletCredit, 29700);
+  assert.equal(res1000.perShedBreakdown.length, 1);
+  assert.equal(res1000.perShedBreakdown[0].shedId, 'Shed-101');
+
+  // Investor with 500 hens in Shed-101 -> 5 cracked eggs loss = Rs. 150 -> Rs. 14,850 net
+  const res500 = calculateMultiShedCollectionYield(investor500, sheds, now);
+  assert.equal(res500.normalIncome, 15000);
+  assert.equal(res500.totalCrackedEggsLost, 5);
+  assert.equal(res500.userShareOfLoss, 150);
+  assert.equal(res500.finalWalletCredit, 14850);
+});
+
+test('Part 1 Multi-Shed Isolation: user with hens in Shed-101 and Shed-102 receives per-shed proportional deduction and unaffected sheds stay at 0 loss', () => {
+  const now = new Date('2026-11-10T10:00:00Z');
+  const sheds = mergeAllSheds([
+    {
+      id: 'Shed-101',
+      nameEn: 'Shed-101',
+      nameUr: 'شیڈ-101',
+      capacity: 5000,
+      totalHens: 5000,
+      dailyEggCollection: 4950,
+      crackedEggsCount: 50,
+      mortalityCount: 2,
+      crackedEggRate: 1,
+      hasSicknessAlert: false,
+      lastUpdated: now.toISOString(),
+    },
+    {
+      id: 'Shed-102',
+      nameEn: 'Shed-102',
+      nameUr: 'شیڈ-102',
+      capacity: 5000,
+      totalHens: 2000,
+      dailyEggCollection: 2000,
+      crackedEggsCount: 0, // Healthy, 0 cracked
+      mortalityCount: 0,
+      crackedEggRate: 0,
+      hasSicknessAlert: false,
+      lastUpdated: now.toISOString(),
+    },
+  ]);
+
+  // Verify all 5 sheds (101..105) are always independently preserved
+  assert.equal(sheds.length, 5);
+  assert.deepEqual(sheds.map((s) => s.id), ['Shed-101', 'Shed-102', 'Shed-103', 'Shed-104', 'Shed-105']);
+
+  const multiShedUser: Pick<UserAccount, 'activeHens' | 'packages'> = {
+    activeHens: 1100,
+    packages: [
+      {
+        id: 'p1',
+        packageId: 'pkg-3',
+        hens: 1000,
+        purchasePrice: 800000,
+        purchasedAt: '2026-11-01T00:00:00Z',
+        approvedAt: '2026-11-01T00:00:00Z',
+        expiresAt: '2027-01-30T00:00:00Z',
+        tid: 'T1',
+        active: true,
+        shedId: 'Shed-101',
+      },
+      {
+        id: 'p2',
+        packageId: 'pkg-3',
+        hens: 100,
+        purchasePrice: 80000,
+        purchasedAt: '2026-11-02T00:00:00Z',
+        approvedAt: '2026-11-02T00:00:00Z',
+        expiresAt: '2027-01-31T00:00:00Z',
+        tid: 'T2',
+        active: true,
+        shedId: 'Shed-102',
+      },
+      {
+        id: 'p-expired',
+        packageId: 'pkg-1',
+        hens: 50,
+        purchasePrice: 40000,
+        purchasedAt: '2026-01-01T00:00:00Z',
+        approvedAt: '2026-01-01T00:00:00Z',
+        expiresAt: '2026-04-01T00:00:00Z', // Expired > 90 days -> excluded!
+        tid: 'T-OLD',
+        active: true,
+        shedId: 'Shed-103',
+      },
+    ],
+  };
+
+  const byShed = getUserActiveHensByShed(multiShedUser, now);
+  assert.equal(byShed['Shed-101'], 1000);
+  assert.equal(byShed['Shed-102'], 100);
+  assert.equal(byShed['Shed-103'], undefined); // Expired excluded
+
+  const yieldRes = calculateMultiShedCollectionYield(multiShedUser, sheds, now);
+  assert.equal(yieldRes.totalUserHens, 1100);
+  assert.equal(yieldRes.normalIncome, 33000); // 1100 * 30
+  assert.equal(yieldRes.totalCrackedEggsLost, 10); // Strictly from Shed-101 only
+  assert.equal(yieldRes.userShareOfLoss, 300); // 1000/5000 * 50 * 30 = 300
+  assert.equal(yieldRes.finalWalletCredit, 32700); // (30000 - 300) + 3000
+
+  const b101 = yieldRes.perShedBreakdown.find((b) => b.shedId === 'Shed-101')!;
+  const b102 = yieldRes.perShedBreakdown.find((b) => b.shedId === 'Shed-102')!;
+  assert.equal(b101.lossDeductionRs, 300);
+  assert.equal(b101.netCreditRs, 29700);
+  assert.equal(b102.lossDeductionRs, 0);
+  assert.equal(b102.netCreditRs, 3000);
+
+  // Aggregate global farm stats across all 5 sheds
+  const globalStats = aggregateGlobalStatsFromSheds(sheds);
+  assert.equal(globalStats.totalCollected, 6950); // 4950 + 2000
+  assert.equal(globalStats.cracked, 50);
+  assert.equal(globalStats.netFresh, 6900);
+});
+
+test('Part 2 Global Farm Production Stats: aggregates all 5 sheds (Shed-101 to Shed-105, 25,000 capacity) accurately', () => {
+  const now = new Date('2026-11-18T10:00:00Z');
+  const fullFarmSheds: FarmShed[] = mergeAllSheds([
+    {
+      id: 'Shed-101',
+      nameEn: 'Shed-101',
+      nameUr: 'شیڈ-101',
+      capacity: 5000,
+      totalHens: 5000,
+      dailyEggCollection: 5000,
+      crackedEggsCount: 50,
+      mortalityCount: 4,
+      crackedEggRate: 1,
+      hasSicknessAlert: false,
+      lastUpdated: now.toISOString(),
+    },
+    {
+      id: 'Shed-102',
+      nameEn: 'Shed-102',
+      nameUr: 'شیڈ-102',
+      capacity: 5000,
+      totalHens: 5000,
+      dailyEggCollection: 4980,
+      crackedEggsCount: 20,
+      mortalityCount: 1,
+      crackedEggRate: 0.4,
+      hasSicknessAlert: false,
+      lastUpdated: now.toISOString(),
+    },
+    {
+      id: 'Shed-103',
+      nameEn: 'Shed-103',
+      nameUr: 'شیڈ-103',
+      capacity: 5000,
+      totalHens: 5000,
+      dailyEggCollection: 5000,
+      crackedEggsCount: 30,
+      mortalityCount: 2,
+      crackedEggRate: 0.6,
+      hasSicknessAlert: false,
+      lastUpdated: now.toISOString(),
+    },
+    {
+      id: 'Shed-104',
+      nameEn: 'Shed-104',
+      nameUr: 'شیڈ-104',
+      capacity: 5000,
+      totalHens: 5000,
+      dailyEggCollection: 4900,
+      crackedEggsCount: 15,
+      mortalityCount: 0,
+      crackedEggRate: 0.3,
+      hasSicknessAlert: false,
+      lastUpdated: now.toISOString(),
+    },
+    {
+      id: 'Shed-105',
+      nameEn: 'Shed-105',
+      nameUr: 'شیڈ-105',
+      capacity: 5000,
+      totalHens: 5000,
+      dailyEggCollection: 5000,
+      crackedEggsCount: 10,
+      mortalityCount: 3,
+      crackedEggRate: 0.2,
+      hasSicknessAlert: false,
+      lastUpdated: now.toISOString(),
+    },
+  ]);
+
+  const agg = aggregateGlobalStatsFromSheds(fullFarmSheds);
+  assert.equal(agg.shedCount, 5);
+  assert.equal(agg.totalCapacity, 25000);
+  assert.equal(agg.totalActiveHens, 25000);
+  assert.equal(agg.totalCollected, 24880); // 5000+4980+5000+4900+5000
+  assert.equal(agg.cracked, 125); // 50+20+30+15+10
+  assert.equal(agg.netFresh, 24755); // 24880 - 125
+  assert.equal(agg.totalMortality, 10); // 4+1+2+0+3
+});
+
+
 
 

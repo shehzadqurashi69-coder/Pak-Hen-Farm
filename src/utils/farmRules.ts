@@ -3,7 +3,7 @@
  * Pure functions decoupled from React UI for deterministic testing and rock-solid state management.
  */
 
-import { HenPackage, PurchasedPackage, UserAccount, FarmShed, UserAlert, ShedPerformancePoint, FarmBanner, FarmGalleryItem, FarmProfileSettings, PaymentAccount } from '../types/farm';
+import { HenPackage, PurchasedPackage, UserAccount, FarmShed, UserAlert, ShedPerformancePoint, FarmBanner, FarmGalleryItem, FarmProfileSettings, PaymentAccount, ShedCollectionBreakdown, GlobalFarmStats } from '../types/farm';
 
 export const EGG_PRICE_PKR = 30; // 1 Egg = Rs. 30
 export const MIN_WITHDRAWAL_EGGS = 10; // 10 Eggs = Rs. 300
@@ -248,6 +248,10 @@ export const OFFICIAL_INFO = {
   trustBadge: 'Pak Hen Farm is a 100% real physical poultry farm providing services all over Pakistan.',
   trustBadgeUrdu: 'پاک ہین فارم ایک 100% حقیقی فزیکل پولٹری فارم ہے جو پورے پاکستان میں اپنی خدمات فراہم کر رہا ہے۔',
   helpline: '03105625924',
+  whatsappSupportPhone: '03231960307',
+  whatsappSupportUrl: 'https://wa.me/923231960307',
+  facebookUrl: 'https://www.facebook.com/share/14ukmorCZNy/',
+  tiktokUrl: 'https://tiktok.com/@pakhenfarm',
   adminEmail: 'shehzadqurashi69@gmail.com',
   adminEmails: ['shehzadqurashi69@gmail.com', 'shehzadqurashi9@gmail.com', 'admin@pakhenfarm.com'],
   staffEmail: 'staff@pakhenfarm.com',
@@ -905,7 +909,11 @@ export const INITIAL_SHEDS: FarmShed[] = [
     nameUr: 'شیڈ-101 (الفا فلاک)',
     capacity: 5000,
     totalHens: 0,
+    dailyEggCollection: 0,
+    crackedEggsCount: 0,
+    netFreshEggs: 0,
     mortalityCount: 0,
+    dailyMortalityCount: 0,
     crackedEggRate: 0,
     hasSicknessAlert: false,
     lastUpdated: new Date().toISOString(),
@@ -916,7 +924,11 @@ export const INITIAL_SHEDS: FarmShed[] = [
     nameUr: 'شیڈ-102 (بیٹا فلاک)',
     capacity: 5000,
     totalHens: 0,
+    dailyEggCollection: 0,
+    crackedEggsCount: 0,
+    netFreshEggs: 0,
     mortalityCount: 0,
+    dailyMortalityCount: 0,
     crackedEggRate: 0,
     hasSicknessAlert: false,
     lastUpdated: new Date().toISOString(),
@@ -927,7 +939,11 @@ export const INITIAL_SHEDS: FarmShed[] = [
     nameUr: 'شیڈ-103 (گاما فلاک)',
     capacity: 5000,
     totalHens: 0,
+    dailyEggCollection: 0,
+    crackedEggsCount: 0,
+    netFreshEggs: 0,
     mortalityCount: 0,
+    dailyMortalityCount: 0,
     crackedEggRate: 0,
     hasSicknessAlert: false,
     lastUpdated: new Date().toISOString(),
@@ -938,7 +954,11 @@ export const INITIAL_SHEDS: FarmShed[] = [
     nameUr: 'شیڈ-104 (ڈیلٹا فلاک)',
     capacity: 5000,
     totalHens: 0,
+    dailyEggCollection: 0,
+    crackedEggsCount: 0,
+    netFreshEggs: 0,
     mortalityCount: 0,
+    dailyMortalityCount: 0,
     crackedEggRate: 0,
     hasSicknessAlert: false,
     lastUpdated: new Date().toISOString(),
@@ -949,7 +969,11 @@ export const INITIAL_SHEDS: FarmShed[] = [
     nameUr: 'شیڈ-105 (ایپسیلون فلاک)',
     capacity: 5000,
     totalHens: 0,
+    dailyEggCollection: 0,
+    crackedEggsCount: 0,
+    netFreshEggs: 0,
     mortalityCount: 0,
+    dailyMortalityCount: 0,
     crackedEggRate: 0,
     hasSicknessAlert: false,
     lastUpdated: new Date().toISOString(),
@@ -1235,13 +1259,27 @@ export function isUserLocked(user?: UserAccount | null): boolean {
 }
 
 /**
+ * Helper to check if a package entry counts as active for shed aggregation
+ * (enforces 90-day expiry when dates are present while remaining compatible with lightweight mock packages).
+ */
+function isShedPackageCountable(
+  pkg: { active?: boolean; hens?: number; expiresAt?: string; purchasedAt?: string; approvedAt?: string },
+  now: Date
+): boolean {
+  if (!pkg || pkg.active !== true || (pkg.hens || 0) <= 0) return false;
+  if (!pkg.expiresAt && !pkg.purchasedAt && !pkg.approvedAt) return true;
+  return isPackageActive(pkg as PurchasedPackage, now);
+}
+
+/**
  * Dynamic SUM formula for Live Shed Capacity:
  * SUM(All Active Hens from Users assigned to this Shed)
  * Handles both package-level shed assignments and user activeHens (e.g. Minha having 125 hens in Shed-101).
  */
 export function calculateShedDynamicSum(
   shedId: string,
-  users: Array<{ activeHens?: number; packages?: Array<{ shedId?: string; active?: boolean; hens?: number }> }>
+  users: Array<{ activeHens?: number; packages?: Array<{ shedId?: string; active?: boolean; hens?: number; expiresAt?: string; purchasedAt?: string; approvedAt?: string }> }>,
+  now: Date = new Date()
 ): number {
   return users.reduce((total, user) => {
     const pkgs = user.packages || [];
@@ -1249,7 +1287,7 @@ export function calculateShedDynamicSum(
     let totalPkgActiveHens = 0;
 
     for (const p of pkgs) {
-      if (p.active && (p.hens || 0) > 0) {
+      if (isShedPackageCountable(p, now)) {
         totalPkgActiveHens += p.hens || 0;
         const targetShed = p.shedId || 'Shed-101';
         if (targetShed === shedId) {
@@ -1264,6 +1302,235 @@ export function calculateShedDynamicSum(
 
     return total + pkgHensInShed + unallocatedHens;
   }, 0);
+}
+
+/**
+ * Returns raw cracked eggs count for a shed, falling back to percentage only if raw count is unset.
+ */
+export function getShedCrackedEggsCount(shed: Pick<FarmShed, 'totalHens' | 'crackedEggsCount' | 'crackedEggRate'>): number {
+  if (typeof shed.crackedEggsCount === 'number' && !isNaN(shed.crackedEggsCount)) {
+    return Math.max(0, Math.floor(shed.crackedEggsCount));
+  }
+  const hens = Math.max(0, Number(shed.totalHens) || 0);
+  const rate = Math.max(0, Number(shed.crackedEggRate) || 0);
+  return rate > 0 && hens > 0 ? Math.round((hens * rate) / 100) : 0;
+}
+
+/**
+ * Merges Firestore shed docs against all 5 canonical sheds (Shed-101 through Shed-105)
+ * so every shed is always tracked independently even if only some docs exist in Firestore.
+ */
+export function mergeAllSheds(
+  shedDocs: FarmShed[],
+  shedHensSum?: Record<string, number>
+): FarmShed[] {
+  const byId = new Map<string, FarmShed>();
+  for (const base of INITIAL_SHEDS) {
+    byId.set(base.id, { ...base });
+  }
+  for (const docItem of shedDocs || []) {
+    if (!docItem || !docItem.id) continue;
+    const base = byId.get(docItem.id) || {
+      ...INITIAL_SHEDS[0],
+      id: docItem.id,
+      nameEn: docItem.nameEn || docItem.id,
+      nameUr: docItem.nameUr || docItem.id,
+    };
+    byId.set(docItem.id, { ...base, ...docItem });
+  }
+
+  const merged = Array.from(byId.values()).map((s) => {
+    const liveHens = shedHensSum ? Math.max(0, shedHensSum[s.id] ?? 0) : Math.max(0, Number(s.totalHens) || 0);
+    const crackedEggs = getShedCrackedEggsCount({ ...s, totalHens: liveHens });
+    const dailyCollected =
+      typeof s.dailyEggCollection === 'number' && !isNaN(s.dailyEggCollection)
+        ? Math.max(0, Math.floor(s.dailyEggCollection))
+        : liveHens;
+    const netFresh = Math.max(0, dailyCollected - crackedEggs);
+    const computedRate = liveHens > 0 ? Math.round((crackedEggs / liveHens) * 1000) / 10 : 0;
+
+    return {
+      ...s,
+      capacity: s.capacity || SHED_CAPACITY,
+      totalHens: liveHens,
+      dailyEggCollection: dailyCollected,
+      crackedEggsCount: crackedEggs,
+      netFreshEggs: netFresh,
+      crackedEggRate: typeof s.crackedEggRate === 'number' && crackedEggs === 0 ? s.crackedEggRate : computedRate,
+      mortalityCount: Math.max(0, Number(s.mortalityCount) || 0),
+    };
+  });
+
+  merged.sort((a, b) => a.id.localeCompare(b.id));
+  return merged;
+}
+
+/**
+ * Returns active hen counts grouped per assigned Shed (Shed-101 .. Shed-105) for a user.
+ * Enforces 90-day package expiry and assigns legacy/unallocated activeHens to Shed-101.
+ */
+export function getUserActiveHensByShed(
+  user: Pick<UserAccount, 'activeHens' | 'packages'>,
+  now: Date = new Date()
+): Record<string, number> {
+  const byShed: Record<string, number> = {};
+  const pkgs = Array.isArray(user.packages) ? user.packages : [];
+
+  if (pkgs.length > 0) {
+    let totalPkgActiveHens = 0;
+    for (const p of pkgs) {
+      if (isShedPackageCountable(p, now)) {
+        const sId = p.shedId || 'Shed-101';
+        const hens = Math.max(0, Number(p.hens) || 0);
+        byShed[sId] = (byShed[sId] || 0) + hens;
+        totalPkgActiveHens += hens;
+      }
+    }
+    const unallocated = Math.max(0, (Number(user.activeHens) || 0) - totalPkgActiveHens);
+    if (unallocated > 0 && pkgs.every((p) => isShedPackageCountable(p, now))) {
+      byShed['Shed-101'] = (byShed['Shed-101'] || 0) + unallocated;
+    }
+    return byShed;
+  }
+
+  const fallbackHens = Math.max(0, Number(user.activeHens) || 0);
+  if (fallbackHens > 0) {
+    byShed['Shed-101'] = fallbackHens;
+  }
+  return byShed;
+}
+
+export interface MultiShedCollectionYieldResult {
+  totalUserHens: number;
+  normalIncome: number;
+  userShareOfLoss: number;
+  finalWalletCredit: number;
+  totalCrackedEggsLost: number;
+  totalShedCrackedEggs: number;
+  totalShedDeadHens: number;
+  totalShedLossRs: number;
+  lossPerHen: number;
+  hasLoss: boolean;
+  perShedBreakdown: ShedCollectionBreakdown[];
+}
+
+/**
+ * Multi-Shed Mudarabah Proportional Loss Distribution:
+ * Calculates proportional cracked-egg loss strictly per assigned shed using that shed's own
+ * total active hens and cracked egg count, then sums across all sheds the user participates in.
+ *
+ * Example: If Shed-101 has 5,000 hens and 50 cracked eggs:
+ * - Investor with 1,000 hens loses 10 eggs (Rs. 300) -> Net Rs. 29,700
+ * - Investor with 500 hens loses 5 eggs (Rs. 150) -> Net Rs. 14,850
+ */
+export function calculateMultiShedCollectionYield(
+  user: Pick<UserAccount, 'activeHens' | 'packages'>,
+  sheds: FarmShed[],
+  now: Date = new Date()
+): MultiShedCollectionYieldResult {
+  const userShedMap = getUserActiveHensByShed(user, now);
+  const shedLookup = new Map<string, FarmShed>();
+  for (const s of sheds || []) {
+    shedLookup.set(s.id, s);
+  }
+
+  const breakdown: ShedCollectionBreakdown[] = [];
+  let totalUserHens = 0;
+  let totalNormalIncome = 0;
+  let totalUserShareOfLoss = 0;
+  let totalFinalWalletCredit = 0;
+  let totalCrackedEggsLost = 0;
+  let totalShedCrackedEggs = 0;
+  let totalShedDeadHens = 0;
+  let totalShedLossRs = 0;
+
+  const sortedShedIds = Object.keys(userShedMap).sort((a, b) => a.localeCompare(b));
+
+  for (const shedId of sortedShedIds) {
+    const userHensInShed = userShedMap[shedId] || 0;
+    if (userHensInShed <= 0) continue;
+
+    const shedData = shedLookup.get(shedId);
+    // Use actual live hens in the shed (never substitute a fake 5000 when shed has fewer/exact hens)
+    const rawShedHens = shedData ? Number(shedData.totalHens) || 0 : 0;
+    const effectiveShedHens = Math.max(userHensInShed, rawShedHens);
+    const shedCrackedEggs = shedData ? getShedCrackedEggsCount({ ...shedData, totalHens: effectiveShedHens }) : 0;
+    const shedDeadHens = shedData ? Math.max(0, Number(shedData.mortalityCount) || 0) : 0;
+
+    const shedLoss = calculateProportionalFinancialLoss(
+      userHensInShed,
+      0, // Mortality loss is settled directly against wallet via cloudApplyShedMortality
+      shedCrackedEggs,
+      effectiveShedHens,
+      HEN_REPLACEMENT_PRICE_PKR
+    );
+
+    const ownershipRatio = effectiveShedHens > 0 ? userHensInShed / effectiveShedHens : 0;
+    const userCrackedEggsLost =
+      shedCrackedEggs > 0
+        ? Math.min(userHensInShed, Math.round(shedCrackedEggs * ownershipRatio * 100) / 100)
+        : 0;
+
+    totalUserHens += userHensInShed;
+    totalNormalIncome += shedLoss.normalIncome;
+    totalUserShareOfLoss += shedLoss.userShareOfLoss;
+    totalFinalWalletCredit += shedLoss.finalWalletCredit;
+    totalCrackedEggsLost = Math.round((totalCrackedEggsLost + userCrackedEggsLost) * 100) / 100;
+    totalShedCrackedEggs += shedCrackedEggs;
+    totalShedDeadHens += shedDeadHens;
+    totalShedLossRs += shedLoss.totalShedLossRs;
+
+    breakdown.push({
+      shedId,
+      userHensInShed,
+      shedTotalHens: effectiveShedHens,
+      shedCrackedEggs,
+      userCrackedEggsLost,
+      normalIncome: shedLoss.normalIncome,
+      lossDeductionRs: shedLoss.userShareOfLoss,
+      netCreditRs: shedLoss.finalWalletCredit,
+    });
+  }
+
+  const avgLossPerHen = totalUserHens > 0 ? Math.round((totalUserShareOfLoss / totalUserHens) * 100) / 100 : 0;
+
+  return {
+    totalUserHens,
+    normalIncome: totalNormalIncome,
+    userShareOfLoss: totalUserShareOfLoss,
+    finalWalletCredit: totalFinalWalletCredit,
+    totalCrackedEggsLost,
+    totalShedCrackedEggs,
+    totalShedDeadHens,
+    totalShedLossRs,
+    lossPerHen: avgLossPerHen,
+    hasLoss: totalUserShareOfLoss > 0,
+    perShedBreakdown: breakdown,
+  };
+}
+
+/**
+ * Aggregates all 5 sheds (Shed-101 to Shed-105) into global farm production stats.
+ */
+export function aggregateGlobalStatsFromSheds(sheds: FarmShed[]): GlobalFarmStats {
+  const allSheds = mergeAllSheds(sheds);
+  const totalActiveHens = allSheds.reduce((sum, s) => sum + Math.max(0, Number(s.totalHens) || 0), 0);
+  const totalCapacity = allSheds.reduce((sum, s) => sum + (Number(s.capacity) || SHED_CAPACITY), 0);
+  const totalCollected = allSheds.reduce((sum, s) => sum + (Number(s.dailyEggCollection) || Number(s.totalHens) || 0), 0);
+  const cracked = allSheds.reduce((sum, s) => sum + getShedCrackedEggsCount(s), 0);
+  const netFresh = Math.max(0, totalCollected - cracked);
+  const totalMortality = allSheds.reduce((sum, s) => sum + Math.max(0, Number(s.mortalityCount) || 0), 0);
+
+  return {
+    totalCollected,
+    cracked,
+    netFresh,
+    totalActiveHens,
+    totalCapacity,
+    totalMortality,
+    shedCount: allSheds.length,
+    lastUpdated: new Date().toISOString(),
+  };
 }
 
 export const HEN_REPLACEMENT_PRICE_PKR = 1000;

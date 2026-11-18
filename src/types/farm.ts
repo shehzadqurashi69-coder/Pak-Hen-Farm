@@ -30,6 +30,17 @@ export interface PurchasedPackage {
   shedId?: string; // e.g. 'Shed-101', 'Shed-102', 'Shed-103', 'Shed-104', 'Shed-105'
 }
 
+export interface ShedCollectionBreakdown {
+  shedId: string;
+  userHensInShed: number;
+  shedTotalHens: number;
+  shedCrackedEggs: number;
+  userCrackedEggsLost: number;
+  normalIncome: number;
+  lossDeductionRs: number;
+  netCreditRs: number;
+}
+
 export interface EggCollectionRecord {
   id: string;
   userId: string;
@@ -39,6 +50,7 @@ export interface EggCollectionRecord {
   eggsCollected: number;
   cashEarned: number; // in PKR (final amount credited)
   crackedDeduction?: number; // legacy
+  crackedEggsLost?: number; // proportional cracked eggs share deducted
   normalIncome?: number; // User's Active Hens * Rs. 30
   shedLossDeduction?: number; // User's Share of Loss in PKR
   finalCredit?: number; // Normal User Income - User's Share of Loss
@@ -46,6 +58,7 @@ export interface EggCollectionRecord {
   lossPerHen?: number;
   shedDeadHens?: number;
   shedCrackedEggs?: number;
+  shedBreakdown?: ShedCollectionBreakdown[];
 }
 
 export type UserStatus = 'active' | 'suspended' | 'banned';
@@ -208,6 +221,10 @@ export interface GlobalFarmStats {
   cracked: number;
   netFresh: number;
   lastUpdated: string;
+  totalActiveHens?: number;
+  totalCapacity?: number;
+  totalMortality?: number;
+  shedCount?: number;
 }
 
 // ---------------- ADVANCED REAL-WORLD SHED & MUDARABAH TYPES ----------------
@@ -219,9 +236,12 @@ export interface FarmShed {
   name?: string;
   location?: string;
   capacity: number; // 5000
-  totalHens: number; // Current active hens in this shed
-  mortalityCount: number; // Total deceased hens recorded
-  crackedEggsCount?: number; // Raw Number of Cracked Eggs (e.g. 8)
+  totalHens: number; // Current active hens in this shed (independent per shed)
+  dailyEggCollection?: number; // Independent daily egg collection recorded for this shed
+  netFreshEggs?: number; // Computed dailyEggCollection - crackedEggsCount
+  mortalityCount: number; // Total deceased hens recorded in this shed
+  dailyMortalityCount?: number; // Most recent mortality event count logged
+  crackedEggsCount?: number; // Raw Number of Cracked/Damaged Eggs in this shed (e.g. 50)
   crackedEggRate: number; // Percentage 0 - 100 (kept for backwards compatibility)
   hasSicknessAlert: boolean; // Sickness declared
   sicknessMessageEn?: string;

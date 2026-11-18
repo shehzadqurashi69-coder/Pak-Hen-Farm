@@ -23,6 +23,7 @@ import {
   apiRejectWithdrawal,
   apiGetStats,
   apiUpdateStats,
+  apiSyncGlobalStatsFromSheds,
   apiGetUsers,
   subscribeToOrders,
   subscribeToUsers,
@@ -39,7 +40,7 @@ import {
   apiUpdatePaymentSettings,
   apiReplyTicket,
   apiApplyShedMortality,
-  apiUpdateShedCracking,
+  apiUpdateShedDailyLog,
   apiDeclareShedSickness,
   apiSetUserStatus,
   apiApproveMedicalPayment,
@@ -62,7 +63,15 @@ import {
   INITIAL_SHEDS,
   SHED_CAPACITY,
   MEDICAL_FEE_PKR,
+  EGG_PRICE_PKR,
+  HEN_REPLACEMENT_PRICE_PKR,
   calculateShedDynamicSum,
+  mergeAllSheds,
+  getUserActiveHensByShed,
+  getShedCrackedEggsCount,
+  aggregateGlobalStatsFromSheds,
+  calculateProportionalFinancialLoss,
+  calculateMortalityFinancialDeduction,
   DEFAULT_BANNERS,
   DEFAULT_GALLERY_ITEMS,
   DEFAULT_FARM_PROFILE,
@@ -237,10 +246,11 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
   const [actionReasonNote, setActionReasonNote] = useState('');
   const [isProcessingAction, setIsProcessingAction] = useState(false);
 
-  // Shed Management State
+  // Shed Management State (Part 1: Multi-Shed Shed-101 to Shed-105 & Proportional Loss)
   const [sheds, setSheds] = useState<FarmShed[]>(INITIAL_SHEDS);
   const [selectedShedId, setSelectedShedId] = useState<string>('Shed-101');
   const [mortalityDeathsInput, setMortalityDeathsInput] = useState<string>('');
+  const [dailyEggCollectionInput, setDailyEggCollectionInput] = useState<string>('0');
   const [crackedRateInput, setCrackedRateInput] = useState<string>('0');
   const [shedActionLoading, setShedActionLoading] = useState(false);
   const [shedSuccessMessage, setShedSuccessMessage] = useState<string | null>(null);
@@ -250,6 +260,8 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
   const [totalCollectedInput, setTotalCollectedInput] = useState('0');
   const [crackedInput, setCrackedInput] = useState('0');
   const [statsSuccess, setStatsSuccess] = useState(false);
+  const [statsSyncMessage, setStatsSyncMessage] = useState<string | null>(null);
+  const [isSyncingStatsFromSheds, setIsSyncingStatsFromSheds] = useState(false);
 
   // Search filter for Users Directory
   const [searchQuery, setSearchQuery] = useState('');
@@ -325,7 +337,8 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
       setSheds(liveSheds);
       const current = liveSheds.find((s) => s.id === selectedShedId);
       if (current) {
-        setCrackedRateInput(String(typeof current.crackedEggsCount === 'number' ? current.crackedEggsCount : (current.crackedEggRate || 0)));
+        setCrackedRateInput(String(getShedCrackedEggsCount(current)));
+        setDailyEggCollectionInput(String(current.dailyEggCollection ?? current.totalHens ?? 0));
       }
     });
 
@@ -1059,22 +1072,61 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
       });
       setGlobalStats(updated);
       setStatsSuccess(true);
+      setStatsSyncMessage(null);
       setTimeout(() => setStatsSuccess(false), 3000);
     } catch (err: any) {
       alert(err.message || 'Error updating stats');
     }
   };
 
-  // Shed Management Handlers - Dynamic SUM Formula (SUM of active hens from users assigned to this shed)
-  const selectedShedRaw = sheds.find((s) => s.id === selectedShedId) || sheds[0] || INITIAL_SHEDS[0];
-  const selectedShedLiveHens = Math.max(selectedShedRaw.totalHens || 0, calculateShedDynamicSum(selectedShedRaw.id, usersList));
-  const selectedShed = { ...selectedShedRaw, totalHens: selectedShedLiveHens };
+  const handleSyncStatsFromSheds = async () => {
+    try {
+      setIsSyncingStatsFromSheds(true);
+      setStatsSuccess(false);
+      const synced = await apiSyncGlobalStatsFromSheds(adminUser);
+      setGlobalStats(synced);
+      setTotalCollectedInput(String(synced.totalCollected || 0));
+      setCrackedInput(String(synced.cracked || 0));
+      setStatsSyncMessage(strings.statsSyncedFromShedsSuccess);
+      setTimeout(() => setStatsSyncMessage(null), 4000);
+    } catch (err: any) {
+      setStatsSyncMessage(err?.message || 'Error syncing global stats from sheds');
+    } finally {
+      setIsSyncingStatsFromSheds(false);
+    }
+  };
+
+  // Shed Management Handlers - Independent 5-Shed Tracking (Shed-101 to Shed-105)
+  const nowShedCalc = new Date();
+  const shedHensSumMap: Record<string, number> = {};
+  for (const baseShed of INITIAL_SHEDS) {
+    shedHensSumMap[baseShed.id] = calculateShedDynamicSum(baseShed.id, usersList, nowShedCalc);
+  }
+  const normalizedSheds = mergeAllSheds(sheds, shedHensSumMap).map((merged) => {
+    const rawMatch = sheds.find((s) => s.id === merged.id);
+    const liveHens = Math.max(merged.totalHens || 0, rawMatch?.totalHens || 0);
+    const cracked = getShedCrackedEggsCount({ ...merged, totalHens: liveHens });
+    const dailyEggs =
+      typeof rawMatch?.dailyEggCollection === 'number'
+        ? rawMatch.dailyEggCollection
+        : liveHens;
+    return {
+      ...merged,
+      totalHens: liveHens,
+      dailyEggCollection: dailyEggs,
+      crackedEggsCount: cracked,
+      netFreshEggs: Math.max(0, dailyEggs - cracked),
+    };
+  });
+
+  const selectedShed = normalizedSheds.find((s) => s.id === selectedShedId) || normalizedSheds[0] || INITIAL_SHEDS[0];
 
   const handleSelectShed = (shedId: string) => {
     setSelectedShedId(shedId);
-    const target = sheds.find((s) => s.id === shedId);
+    const target = normalizedSheds.find((s) => s.id === shedId);
     if (target) {
-      setCrackedRateInput(String(typeof target.crackedEggsCount === 'number' ? target.crackedEggsCount : (target.crackedEggRate || 0)));
+      setCrackedRateInput(String(getShedCrackedEggsCount(target)));
+      setDailyEggCollectionInput(String(target.dailyEggCollection ?? target.totalHens ?? 0));
     }
     setMortalityDeathsInput('');
     setShedSuccessMessage(null);
@@ -1108,21 +1160,36 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
     e.preventDefault();
     setShedSuccessMessage(null);
     setShedErrorMessage(null);
-    const count = parseInt(crackedRateInput, 10);
-    if (isNaN(count) || count < 0) {
-      setShedErrorMessage(isUr ? 'براہ کرم ٹوٹے ہوئے انڈوں کی درست تعداد درج کریں (مثلاً: 8)' : 'Please enter a valid number of cracked eggs (e.g. 8).');
+    const crackedCount = parseInt(crackedRateInput, 10);
+    const dailyEggsCount =
+      dailyEggCollectionInput.trim() === ''
+        ? selectedShed.dailyEggCollection ?? selectedShed.totalHens ?? 0
+        : parseInt(dailyEggCollectionInput, 10);
+
+    if (isNaN(crackedCount) || crackedCount < 0) {
+      setShedErrorMessage(isUr ? 'براہ کرم ٹوٹے ہوئے انڈوں کی درست تعداد درج کریں (مثلاً: 50)' : 'Please enter a valid number of cracked eggs (e.g. 50).');
+      return;
+    }
+    if (isNaN(dailyEggsCount) || dailyEggsCount < 0) {
+      setShedErrorMessage(isUr ? 'براہ کرم روزانہ جمع شدہ انڈوں کی درست تعداد درج کریں' : 'Please enter a valid daily egg collection count.');
       return;
     }
     try {
       setShedActionLoading(true);
-      await apiUpdateShedCracking(adminUser, selectedShedId, count);
+      const updatedShed = await apiUpdateShedDailyLog(adminUser, selectedShedId, {
+        dailyEggCollection: dailyEggsCount,
+        crackedEggsCount: crackedCount,
+      });
+      setSheds((prev) =>
+        mergeAllSheds(prev).map((s) => (s.id === selectedShedId ? { ...s, ...updatedShed } : s))
+      );
       setShedSuccessMessage(
-        isUr
-          ? `${selectedShedId} کے لیے ٹوٹے ہوئے انڈوں کی تعداد ${count} انڈے محفوظ کر دی گئی۔`
-          : `Cracked eggs recorded as ${count} eggs for ${selectedShedId}. Proportional loss will be deducted during user collections.`
+        strings.crackingUpdatedSuccess
+          .replace(/\{shedId\}/g, selectedShedId)
+          .replace('{cracked}', String(crackedCount))
       );
     } catch (err: any) {
-      setShedErrorMessage(err.message || 'Failed to update cracked eggs');
+      setShedErrorMessage(err.message || 'Failed to update shed egg log');
     } finally {
       setShedActionLoading(false);
     }
@@ -1347,9 +1414,8 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
         </div>
       </div>
 
-      {/* Admin Tabs (Phase 3: 6 Dedicated Tabs) */}
-      {/* Admin Tabs (9 Dedicated Control Tabs) */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 lg:grid-cols-9 gap-2 rounded-2xl bg-[#0a2618] p-1.5 border border-[#d4af37]/30">
+      {/* Admin Tabs (Balanced 2x5 Dedicated Control Tabs) */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 lg:grid-cols-5 gap-2 rounded-2xl bg-[#0a2618] p-1.5 border border-[#d4af37]/30">
         <button
           onClick={() => setActiveTab('orders')}
           className={`relative rounded-xl py-2 text-xs font-bold transition-all cursor-pointer ${
@@ -3891,324 +3957,684 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
         </div>
       )}
 
-      {/* TAB: LIVE SHED MANAGEMENT */}
-      {activeTab === 'sheds' && (
-        <div className="space-y-6">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-[#0a2618]/90 p-5 rounded-3xl border border-[#d4af37]/30">
-            <div>
-              <div className="flex items-center gap-2.5">
-                <Warehouse className="h-6 w-6 text-[#d4af37]" />
-                <h3 className="text-lg font-extrabold text-[#f4efe6]">
-                  {strings.shedManagementTitle}
-                </h3>
-              </div>
-              <p className="text-xs text-[#f3df88]/80 mt-1">
-                {strings.shedManagementSubtitle}
-              </p>
-            </div>
-          </div>
+      {/* TAB: LIVE SHED MANAGEMENT (PART 1: SHED-101 TO SHED-105 & PROPORTIONAL LOSS) */}
+      {activeTab === 'sheds' && (() => {
+        const previewCracked = Math.max(0, parseInt(crackedRateInput, 10) || 0);
+        const previewShedHens = selectedShed.totalHens;
+        const previewMortality = Math.max(0, parseInt(mortalityDeathsInput, 10) || 0);
 
-          {/* Feedback messages */}
-          {shedSuccessMessage && (
-            <div className="flex items-center gap-2.5 rounded-2xl border border-emerald-500/50 bg-emerald-950/80 p-4 text-emerald-200">
-              <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-400" />
-              <span className="text-xs sm:text-sm font-semibold">{shedSuccessMessage}</span>
-            </div>
-          )}
-          {shedErrorMessage && (
-            <div className="flex items-center gap-2.5 rounded-2xl border border-rose-500/50 bg-rose-950/80 p-4 text-rose-200">
-              <XCircle className="h-5 w-5 shrink-0 text-rose-400" />
-              <span className="text-xs sm:text-sm font-semibold">{shedErrorMessage}</span>
-            </div>
-          )}
+        // Build live per-investor proportional distribution list strictly for selectedShedId
+        const shedInvestors = usersList
+          .map((u) => {
+            const byShed = getUserActiveHensByShed(u, nowShedCalc);
+            const hensInShed = byShed[selectedShedId] || 0;
+            return { user: u, hensInShed };
+          })
+          .filter((item) => item.hensInShed > 0)
+          .sort((a, b) => b.hensInShed - a.hensInShed);
 
-          {/* 5 Virtual Sheds Selector Pills */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2.5">
-            {sheds.map((shed) => {
-              const isSelected = shed.id === selectedShedId;
-              const liveHens = Math.max(shed.totalHens || 0, calculateShedDynamicSum(shed.id, usersList));
-              const percent = Math.min(100, Math.round((liveHens / SHED_CAPACITY) * 100));
-              return (
-                <button
-                  key={shed.id}
-                  onClick={() => handleSelectShed(shed.id)}
-                  className={`p-3.5 rounded-2xl border text-left transition-all cursor-pointer relative overflow-hidden ${
-                    isSelected
-                      ? 'border-[#d4af37] bg-gradient-to-b from-[#143d28] to-[#0a2618] shadow-lg shadow-[#d4af37]/20 ring-1 ring-[#d4af37]'
-                      : 'border-[#d4af37]/20 bg-[#051a10]/70 hover:border-[#d4af37]/50 hover:bg-[#0a2618]'
-                  }`}
-                >
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="font-mono text-sm font-black text-[#f3df88]">
-                      {shed.id}
-                    </span>
-                    {shed.hasSicknessAlert ? (
-                      <span className="flex h-2.5 w-2.5 relative">
-                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
-                        <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-rose-500"></span>
-                      </span>
-                    ) : (
-                      <span className="h-2 w-2 rounded-full bg-emerald-400"></span>
-                    )}
-                  </div>
-                  <div className="text-[11px] text-[#f4efe6]/70 mb-2">
-                    {liveHens.toLocaleString()} / {SHED_CAPACITY.toLocaleString()} {isUr ? 'مرغیاں' : 'Hens'}
-                  </div>
-                  <div className="w-full bg-[#051a10] rounded-full h-1.5 overflow-hidden border border-[#d4af37]/20">
-                    <div
-                      className={`h-full rounded-full transition-all duration-300 ${
-                        percent > 85 ? 'bg-amber-400' : 'bg-gradient-to-r from-emerald-500 to-[#d4af37]'
-                      }`}
-                      style={{ width: `${percent}%` }}
-                    />
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-
-          {/* Selected Shed Overview Card */}
-          <div className="rounded-3xl border border-[#d4af37]/35 bg-[#0a2618]/90 p-5 sm:p-6 shadow-xl space-y-6">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#d4af37]/20 pb-4">
+        return (
+          <div className="space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-[#0a2618]/90 p-5 rounded-3xl border border-[#d4af37]/30">
               <div>
-                <div className="flex items-center gap-3">
-                  <h4 className="text-xl font-black text-[#f3df88] font-mono">
-                    {selectedShed.id}
-                  </h4>
-                  <span
-                    className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold ${
-                      selectedShed.hasSicknessAlert
-                        ? 'border border-rose-500/50 bg-rose-950/70 text-rose-300'
-                        : 'border border-emerald-500/50 bg-emerald-950/70 text-emerald-300'
-                    }`}
-                  >
-                    {selectedShed.hasSicknessAlert ? (
-                      <>
-                        <AlertTriangle className="h-3.5 w-3.5 text-rose-400 animate-pulse" />
-                        <span>{strings.urgentSickness}</span>
-                      </>
-                    ) : (
-                      <>
-                        <HeartPulse className="h-3.5 w-3.5 text-emerald-400" />
-                        <span>{strings.healthyFlock}</span>
-                      </>
-                    )}
-                  </span>
+                <div className="flex items-center gap-2.5">
+                  <Warehouse className="h-6 w-6 text-[#d4af37]" />
+                  <h3 className="text-lg font-extrabold text-[#f4efe6]">
+                    {strings.shedManagementTitle}
+                  </h3>
                 </div>
-                <p className="text-xs text-[#f4efe6]/60 mt-1">
-                  {isUr ? selectedShed.nameUr : selectedShed.nameEn} • {isUr ? 'گنجائش: 5,000 مرغیاں' : 'Capacity: 5,000 Hens'}
+                <p className="text-xs text-[#f3df88]/80 mt-1">
+                  {strings.shedManagementSubtitle}
                 </p>
               </div>
+              <div className="text-xs font-mono text-[#f3df88] bg-[#051a10] border border-[#d4af37]/30 px-3 py-1.5 rounded-xl">
+                {isUr ? 'کل 5 شیڈز (101 تا 105)' : '5 Independent Sheds (101–105)'}
+              </div>
+            </div>
 
-              {/* Sickness Action Button */}
-              <div>
-                {selectedShed.hasSicknessAlert ? (
+            {/* Feedback messages */}
+            {shedSuccessMessage && (
+              <div className="flex items-center gap-2.5 rounded-2xl border border-emerald-500/50 bg-emerald-950/80 p-4 text-emerald-200">
+                <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-400" />
+                <span className="text-xs sm:text-sm font-semibold">{shedSuccessMessage}</span>
+              </div>
+            )}
+            {shedErrorMessage && (
+              <div className="flex items-center gap-2.5 rounded-2xl border border-rose-500/50 bg-rose-950/80 p-4 text-rose-200">
+                <XCircle className="h-5 w-5 shrink-0 text-rose-400" />
+                <span className="text-xs sm:text-sm font-semibold">{shedErrorMessage}</span>
+              </div>
+            )}
+
+            {/* 5 Virtual Sheds Selector Pills (Shed-101 to Shed-105) */}
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2.5">
+              {normalizedSheds.map((shed) => {
+                const isSelected = shed.id === selectedShedId;
+                const liveHens = shed.totalHens || 0;
+                const percent = Math.min(100, Math.round((liveHens / SHED_CAPACITY) * 100));
+                const shedCracked = getShedCrackedEggsCount(shed);
+                return (
                   <button
-                    onClick={() => handleToggleSickness(false)}
-                    disabled={shedActionLoading}
-                    className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 px-4 py-2.5 text-xs font-bold text-white hover:brightness-110 active:scale-95 transition-all cursor-pointer shadow-md"
+                    key={shed.id}
+                    type="button"
+                    onClick={() => handleSelectShed(shed.id)}
+                    className={`p-3.5 rounded-2xl border text-left transition-all cursor-pointer relative overflow-hidden ${
+                      isSelected
+                        ? 'border-[#d4af37] bg-gradient-to-b from-[#143d28] to-[#0a2618] shadow-lg shadow-[#d4af37]/20 ring-1 ring-[#d4af37]'
+                        : 'border-[#d4af37]/20 bg-[#051a10]/70 hover:border-[#d4af37]/50 hover:bg-[#0a2618]'
+                    }`}
                   >
-                    <CheckCircle2 className="h-4 w-4" />
-                    <span>{strings.resolveSicknessBtn}</span>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="font-mono text-sm font-black text-[#f3df88]">
+                        {shed.id}
+                      </span>
+                      {shed.hasSicknessAlert ? (
+                        <span className="flex h-2.5 w-2.5 relative">
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
+                          <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-rose-500"></span>
+                        </span>
+                      ) : (
+                        <span className="h-2 w-2 rounded-full bg-emerald-400"></span>
+                      )}
+                    </div>
+                    <div className="text-[11px] text-[#f4efe6]/80 font-semibold mb-1">
+                      {liveHens.toLocaleString()} / {SHED_CAPACITY.toLocaleString()} {isUr ? 'مرغیاں' : 'Hens'}
+                    </div>
+                    <div className="flex items-center justify-between text-[10px] font-mono text-[#f4efe6]/60 mb-2">
+                      <span>🥚 {(shed.dailyEggCollection ?? liveHens).toLocaleString()}</span>
+                      <span className={shedCracked > 0 ? 'text-amber-300' : ''}>⚠️ {shedCracked}</span>
+                      <span className={(shed.mortalityCount || 0) > 0 ? 'text-rose-300' : ''}>💀 {shed.mortalityCount || 0}</span>
+                    </div>
+                    <div className="w-full bg-[#051a10] rounded-full h-1.5 overflow-hidden border border-[#d4af37]/20">
+                      <div
+                        className={`h-full rounded-full transition-all duration-300 ${
+                          percent > 85 ? 'bg-amber-400' : 'bg-gradient-to-r from-emerald-500 to-[#d4af37]'
+                        }`}
+                        style={{ width: `${percent}%` }}
+                      />
+                    </div>
                   </button>
+                );
+              })}
+            </div>
+
+            {/* Selected Shed Overview Card */}
+            <div className="rounded-3xl border border-[#d4af37]/35 bg-[#0a2618]/90 p-5 sm:p-6 shadow-xl space-y-6">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#d4af37]/20 pb-4">
+                <div>
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <h4 className="text-xl font-black text-[#f3df88] font-mono">
+                      {selectedShed.id}
+                    </h4>
+                    <span
+                      className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold ${
+                        selectedShed.hasSicknessAlert
+                          ? 'border border-rose-500/50 bg-rose-950/70 text-rose-300'
+                          : 'border border-emerald-500/50 bg-emerald-950/70 text-emerald-300'
+                      }`}
+                    >
+                      {selectedShed.hasSicknessAlert ? (
+                        <>
+                          <AlertTriangle className="h-3.5 w-3.5 text-rose-400 animate-pulse" />
+                          <span>{strings.urgentSickness}</span>
+                        </>
+                      ) : (
+                        <>
+                          <HeartPulse className="h-3.5 w-3.5 text-emerald-400" />
+                          <span>{strings.healthyFlock}</span>
+                        </>
+                      )}
+                    </span>
+                  </div>
+                  <p className="text-xs text-[#f4efe6]/60 mt-1">
+                    {isUr ? selectedShed.nameUr : selectedShed.nameEn} • {isUr ? 'گنجائش: 5,000 مرغیاں' : 'Capacity: 5,000 Hens'} • {shedInvestors.length} {isUr ? 'سرمایہ کار' : 'Investors'}
+                  </p>
+                </div>
+
+                {/* Sickness Action Button */}
+                <div>
+                  {selectedShed.hasSicknessAlert ? (
+                    <button
+                      type="button"
+                      onClick={() => handleToggleSickness(false)}
+                      disabled={shedActionLoading}
+                      className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 px-4 py-2.5 text-xs font-bold text-white hover:brightness-110 active:scale-95 transition-all cursor-pointer shadow-md"
+                    >
+                      <CheckCircle2 className="h-4 w-4" />
+                      <span>{strings.resolveSicknessBtn}</span>
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => handleToggleSickness(true)}
+                      disabled={shedActionLoading}
+                      className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-rose-600 to-red-700 px-4 py-2.5 text-xs font-bold text-white hover:brightness-110 active:scale-95 transition-all cursor-pointer shadow-md"
+                    >
+                      <AlertTriangle className="h-4 w-4" />
+                      <span>{strings.declareSicknessBtn}</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Shed 6-KPI Statistics Grid (Independent Per-Shed Tracking) */}
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+                <div className="rounded-2xl border border-[#d4af37]/20 bg-[#051a10]/70 p-3.5">
+                  <span className="text-[10px] uppercase font-bold text-[#f3df88]/80 block mb-1">
+                    {strings.shedCurrentHens}
+                  </span>
+                  <span className="text-lg sm:text-xl font-black text-[#d4af37] font-mono">
+                    {selectedShed.totalHens.toLocaleString()}
+                  </span>
+                </div>
+
+                <div className="rounded-2xl border border-[#d4af37]/20 bg-[#051a10]/70 p-3.5">
+                  <span className="text-[10px] uppercase font-bold text-[#f3df88]/80 block mb-1">
+                    {strings.shedAvailableSlots}
+                  </span>
+                  <span className="text-lg sm:text-xl font-black text-emerald-400 font-mono">
+                    {Math.max(0, SHED_CAPACITY - selectedShed.totalHens).toLocaleString()}
+                  </span>
+                </div>
+
+                <div className="rounded-2xl border border-[#d4af37]/20 bg-[#051a10]/70 p-3.5">
+                  <span className="text-[10px] uppercase font-bold text-[#f3df88]/80 block mb-1">
+                    {strings.shedDailyEggsLabel}
+                  </span>
+                  <span className="text-lg sm:text-xl font-black text-[#f3df88] font-mono">
+                    {(selectedShed.dailyEggCollection ?? selectedShed.totalHens).toLocaleString()}
+                  </span>
+                </div>
+
+                <div className="rounded-2xl border border-[#d4af37]/20 bg-[#051a10]/70 p-3.5">
+                  <span className="text-[10px] uppercase font-bold text-amber-300/80 block mb-1">
+                    {strings.shedCrackedEggsLabel}
+                  </span>
+                  <span className="text-lg sm:text-xl font-black text-amber-300 font-mono">
+                    {getShedCrackedEggsCount(selectedShed).toLocaleString()}
+                  </span>
+                </div>
+
+                <div className="rounded-2xl border border-[#d4af37]/20 bg-[#051a10]/70 p-3.5">
+                  <span className="text-[10px] uppercase font-bold text-emerald-300/80 block mb-1">
+                    {strings.shedNetFreshEggsLabel}
+                  </span>
+                  <span className="text-lg sm:text-xl font-black text-emerald-300 font-mono">
+                    {(selectedShed.netFreshEggs ?? Math.max(0, (selectedShed.dailyEggCollection ?? selectedShed.totalHens) - getShedCrackedEggsCount(selectedShed))).toLocaleString()}
+                  </span>
+                </div>
+
+                <div className="rounded-2xl border border-[#d4af37]/20 bg-[#051a10]/70 p-3.5">
+                  <span className="text-[10px] uppercase font-bold text-rose-300/80 block mb-1">
+                    {strings.shedMortalityTotal}
+                  </span>
+                  <span className="text-lg sm:text-xl font-black text-rose-400 font-mono">
+                    {(selectedShed.mortalityCount || 0).toLocaleString()}
+                  </span>
+                </div>
+              </div>
+
+              {/* Action Forms Grid */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 pt-2">
+                {/* 1. Mortality Input Form (Mudarabah Proportional Wallet Deduction) */}
+                <div className="rounded-2xl border border-rose-500/30 bg-[#051a10]/80 p-5 space-y-3.5">
+                  <div className="flex items-center gap-2">
+                    <HeartPulse className="h-5 w-5 text-rose-400" />
+                    <h5 className="text-sm font-bold text-[#f4efe6]">
+                      {strings.mortalityInputLabel}
+                    </h5>
+                  </div>
+                  <p className="text-xs text-[#f4efe6]/60 leading-relaxed">
+                    {strings.mortalityExplanation}
+                  </p>
+                  <form onSubmit={handleApplyMortality} className="space-y-3">
+                    <div>
+                      <input
+                        type="number"
+                        min="1"
+                        max={selectedShed.totalHens || 1}
+                        disabled={selectedShed.totalHens <= 0 || shedActionLoading}
+                        placeholder={strings.mortalityInputPlaceholder}
+                        value={mortalityDeathsInput}
+                        onChange={(e) => setMortalityDeathsInput(e.target.value)}
+                        className="w-full rounded-xl border border-rose-500/30 bg-[#0a2618] px-3.5 py-2.5 text-sm text-[#f4efe6] focus:border-rose-400 focus:outline-none font-mono"
+                      />
+                    </div>
+                    {previewMortality > 0 && previewShedHens > 0 && (
+                      <div className="rounded-xl border border-rose-500/30 bg-rose-950/30 p-2.5 text-[11px] font-mono text-rose-200 space-y-1">
+                        <div className="flex justify-between">
+                          <span>{isUr ? 'کل نقصان:' : 'Total Mortality Loss:'}</span>
+                          <span>Rs. {(previewMortality * HEN_REPLACEMENT_PRICE_PKR).toLocaleString()}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span>{isUr ? 'فی مرغی کٹوتی:' : 'Loss Per Hen in Shed:'}</span>
+                          <span>Rs. {((previewMortality * HEN_REPLACEMENT_PRICE_PKR) / previewShedHens).toFixed(2)}</span>
+                        </div>
+                      </div>
+                    )}
+                    <button
+                      type="submit"
+                      disabled={selectedShed.totalHens <= 0 || shedActionLoading || !mortalityDeathsInput}
+                      className="w-full rounded-xl bg-gradient-to-r from-rose-700 to-rose-600 py-2.5 px-4 text-xs font-bold text-white hover:brightness-110 active:scale-98 transition-all cursor-pointer shadow-md disabled:opacity-50"
+                    >
+                      {strings.applyMortalityBtn}
+                    </button>
+                  </form>
+                </div>
+
+                {/* 2. Daily Egg Collection & Cracked Eggs Independent Shed Logging */}
+                <div className="rounded-2xl border border-amber-500/30 bg-[#051a10]/80 p-5 space-y-3.5">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="h-5 w-5 text-amber-400" />
+                    <h5 className="text-sm font-bold text-[#f4efe6]">
+                      {selectedShed.id}: {isUr ? 'روزانہ انڈوں اور ٹوٹے انڈوں کا ریکارڈ' : 'Daily Egg Collection & Cracked Loss Log'}
+                    </h5>
+                  </div>
+                  <p className="text-xs text-[#f4efe6]/60 leading-relaxed">
+                    {isUr
+                      ? 'اس شیڈ کے روزانہ انڈے اور ٹوٹے ہوئے انڈوں کی تعداد درج کریں۔ نقصان صرف اسی شیڈ کے سرمایہ کاروں میں ان کی فعال مرغیوں کے تناسب سے تقسیم ہو گا۔'
+                      : 'Log daily collected eggs and cracked/damaged eggs for this shed independently. Cracked-egg loss (Count × Rs. 30) is deducted proportionally strictly from investors holding active hens in this shed.'}
+                  </p>
+                  <form onSubmit={handleUpdateCracking} className="space-y-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-[11px] font-bold text-[#f3df88] mb-1">
+                          {strings.shedDailyEggsInputLabel}
+                        </label>
+                        <input
+                          type="number"
+                          step="1"
+                          min="0"
+                          disabled={shedActionLoading}
+                          placeholder={String(selectedShed.totalHens || 0)}
+                          value={dailyEggCollectionInput}
+                          onChange={(e) => setDailyEggCollectionInput(e.target.value)}
+                          className="w-full rounded-xl border border-[#d4af37]/30 bg-[#0a2618] px-3.5 py-2.5 text-sm text-[#f4efe6] focus:border-[#d4af37] focus:outline-none font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-bold text-amber-300 mb-1">
+                          {strings.shedCrackedCountInputLabel}
+                        </label>
+                        <input
+                          type="number"
+                          step="1"
+                          min="0"
+                          disabled={shedActionLoading}
+                          placeholder="e.g. 50"
+                          value={crackedRateInput}
+                          onChange={(e) => setCrackedRateInput(e.target.value)}
+                          className="w-full rounded-xl border border-amber-500/30 bg-[#0a2618] px-3.5 py-2.5 text-sm text-[#f4efe6] focus:border-amber-400 focus:outline-none font-mono"
+                        />
+                      </div>
+                    </div>
+                    <button
+                      type="submit"
+                      disabled={shedActionLoading}
+                      className="w-full rounded-xl bg-gradient-to-r from-[#d4af37] to-[#b38f20] py-2.5 px-4 text-xs font-bold text-[#051a10] hover:brightness-110 active:scale-98 transition-all cursor-pointer shadow-md"
+                    >
+                      {strings.saveShedDailyLogBtn}
+                    </button>
+                  </form>
+                </div>
+              </div>
+
+              {/* Live Mudarabah Proportional Loss Distribution Preview */}
+              <div className="rounded-2xl border border-[#d4af37]/30 bg-[#051a10]/90 p-4 sm:p-5 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#d4af37]/20 pb-2.5">
+                  <div className="flex items-center gap-2">
+                    <Percent className="h-4 w-4 text-[#d4af37]" />
+                    <h5 className="text-sm font-extrabold text-[#f3df88]">
+                      {strings.shedProportionalPreviewTitle} — {selectedShed.id}
+                    </h5>
+                  </div>
+                  <span className="text-[11px] font-mono text-[#f4efe6]/70">
+                    {isUr ? 'کل شیڈ مرغیاں:' : 'Shed Total Hens:'} {previewShedHens.toLocaleString()} • {isUr ? 'ٹوٹے انڈے:' : 'Cracked:'} {previewCracked} (Rs. {(previewCracked * EGG_PRICE_PKR).toLocaleString()})
+                  </span>
+                </div>
+
+                {shedInvestors.length > 0 ? (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead>
+                        <tr className="border-b border-[#d4af37]/20 text-[10px] uppercase text-[#f3df88]/80">
+                          <th className="py-2 pr-3">{isUr ? 'سرمایہ کار' : 'Investor'}</th>
+                          <th className="py-2 px-2">{isUr ? 'شیڈ میں مرغیاں' : 'Hens in Shed'}</th>
+                          <th className="py-2 px-2">{isUr ? 'معمول کی آمدن' : 'Gross Yield'}</th>
+                          <th className="py-2 px-2">{isUr ? 'کریک نقصان کٹوتی' : 'Cracked Loss'}</th>
+                          <th className="py-2 pl-2 text-right">{isUr ? 'خالص کریڈٹ' : 'Net Credit'}</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-white/5 font-mono">
+                        {shedInvestors.map(({ user: inv, hensInShed }) => {
+                          const effectiveTotal = Math.max(previewShedHens, hensInShed);
+                          const calc = calculateProportionalFinancialLoss(
+                            hensInShed,
+                            0,
+                            previewCracked,
+                            effectiveTotal,
+                            HEN_REPLACEMENT_PRICE_PKR
+                          );
+                          const mortCalc =
+                            previewMortality > 0
+                              ? calculateMortalityFinancialDeduction(
+                                  hensInShed,
+                                  effectiveTotal,
+                                  previewMortality,
+                                  inv.walletBalance,
+                                  HEN_REPLACEMENT_PRICE_PKR
+                                )
+                              : null;
+                          const lostEggsShare =
+                            effectiveTotal > 0 && previewCracked > 0
+                              ? Math.round(((hensInShed / effectiveTotal) * previewCracked) * 100) / 100
+                              : 0;
+
+                          return (
+                            <tr key={inv.id} className="hover:bg-white/5">
+                              <td className="py-2 pr-3 font-sans">
+                                <span className="font-bold text-[#f4efe6] block">{inv.fullName}</span>
+                                <span className="text-[10px] text-[#f4efe6]/50">{inv.phone}</span>
+                              </td>
+                              <td className="py-2 px-2 text-[#f3df88] font-bold">
+                                {hensInShed.toLocaleString()} ({effectiveTotal > 0 ? Math.round((hensInShed / effectiveTotal) * 1000) / 10 : 0}%)
+                              </td>
+                              <td className="py-2 px-2 text-emerald-300">
+                                Rs. {calc.normalIncome.toLocaleString()}
+                              </td>
+                              <td className="py-2 px-2 text-rose-300">
+                                -{lostEggsShare} eggs (-Rs. {calc.userShareOfLoss.toLocaleString()})
+                                {mortCalc && mortCalc.userProportionalLoss > 0 && (
+                                  <span className="block text-[10px] text-rose-400">
+                                    Mort: -Rs. {mortCalc.userProportionalLoss.toLocaleString()}
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-2 pl-2 text-right font-black text-[#d4af37]">
+                                Rs. {calc.finalWalletCredit.toLocaleString()}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
                 ) : (
-                  <button
-                    onClick={() => handleToggleSickness(true)}
-                    disabled={shedActionLoading}
-                    className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-rose-600 to-red-700 px-4 py-2.5 text-xs font-bold text-white hover:brightness-110 active:scale-95 transition-all cursor-pointer shadow-md"
-                  >
-                    <AlertTriangle className="h-4 w-4" />
-                    <span>{strings.declareSicknessBtn}</span>
-                  </button>
+                  <div className="rounded-xl border border-[#d4af37]/20 bg-[#0a2618]/60 p-3.5 text-xs text-[#f4efe6]/80 space-y-1.5">
+                    <p className="font-bold text-[#f3df88]">
+                      {isUr
+                        ? `${selectedShed.id} میں فی الحال کوئی فعال سرمایہ کار تفویض نہیں ہے۔ مثالِ تناسب (مضاربہ اصول):`
+                        : `No active investors currently assigned to ${selectedShed.id}. Proportional Mudarabah Formula:`}
+                    </p>
+                    <p className="text-[11px] font-mono text-[#f4efe6]/75">
+                      {isUr
+                        ? 'مثال: اگر شیڈ میں 5,000 مرغیاں ہوں اور 50 انڈے ٹوٹیں → 1,000 مرغیوں والے کا نقصان 10 انڈے (300 روپے) اور 500 مرغیوں والے کا نقصان 5 انڈے (150 روپے) ہو گا۔'
+                        : 'Example: 5,000 hens & 50 cracked eggs → 1,000-hen investor bears 10 eggs (-Rs. 300 → Net Rs. 29,700); 500-hen investor bears 5 eggs (-Rs. 150 → Net Rs. 14,850).'}
+                    </p>
+                  </div>
                 )}
               </div>
             </div>
 
-            {/* Shed Statistics Grid */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <div className="rounded-2xl border border-[#d4af37]/20 bg-[#051a10]/70 p-3.5">
-                <span className="text-[10px] uppercase font-bold text-[#f3df88]/80 block mb-1">
-                  {strings.shedCurrentHens}
-                </span>
-                <span className="text-xl sm:text-2xl font-black text-[#d4af37]">
-                  {selectedShed.totalHens.toLocaleString()}
-                </span>
+            {/* All 5 Sheds Independent Tracker Overview Table */}
+            <div className="rounded-3xl border border-[#d4af37]/30 bg-[#0a2618]/90 p-5 shadow-xl space-y-3">
+              <div className="flex items-center gap-2">
+                <Activity className="h-5 w-5 text-[#d4af37]" />
+                <h4 className="text-sm sm:text-base font-extrabold text-[#f4efe6]">
+                  {strings.shedOverviewTableTitle}
+                </h4>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-[#d4af37]/25 text-[10px] uppercase text-[#f3df88]/80">
+                      <th className="py-2 pr-3">Shed</th>
+                      <th className="py-2 px-2">{strings.shedCurrentHens}</th>
+                      <th className="py-2 px-2">{strings.shedDailyEggsLabel}</th>
+                      <th className="py-2 px-2">{strings.shedCrackedEggsLabel}</th>
+                      <th className="py-2 px-2">{strings.shedNetFreshEggsLabel}</th>
+                      <th className="py-2 px-2">{strings.shedMortalityTotal}</th>
+                      <th className="py-2 pl-2 text-right">{strings.shedHealthStatus}</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/5 font-mono">
+                    {normalizedSheds.map((s) => {
+                      const sCracked = getShedCrackedEggsCount(s);
+                      const sDaily = s.dailyEggCollection ?? s.totalHens;
+                      const sFresh = s.netFreshEggs ?? Math.max(0, sDaily - sCracked);
+                      return (
+                        <tr
+                          key={s.id}
+                          onClick={() => handleSelectShed(s.id)}
+                          className={`cursor-pointer transition-colors ${
+                            s.id === selectedShedId ? 'bg-[#d4af37]/15' : 'hover:bg-white/5'
+                          }`}
+                        >
+                          <td className="py-2.5 pr-3 font-black text-[#f3df88]">{s.id}</td>
+                          <td className="py-2.5 px-2 text-[#f4efe6]">{s.totalHens.toLocaleString()}</td>
+                          <td className="py-2.5 px-2 text-[#f3df88]">{sDaily.toLocaleString()}</td>
+                          <td className="py-2.5 px-2 text-amber-300">{sCracked.toLocaleString()}</td>
+                          <td className="py-2.5 px-2 text-emerald-300 font-bold">{sFresh.toLocaleString()}</td>
+                          <td className="py-2.5 px-2 text-rose-300">{(s.mortalityCount || 0).toLocaleString()}</td>
+                          <td className="py-2.5 pl-2 text-right font-sans">
+                            <span
+                              className={`inline-block rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                                s.hasSicknessAlert
+                                  ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                                  : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                              }`}
+                            >
+                              {s.hasSicknessAlert ? (isUr ? 'الرت فعال' : 'Alert') : (isUr ? 'صحتمند' : 'Healthy')}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* TAB: LIVE STATS INPUT & NATIONWIDE SHED-101..105 AGGREGATION */}
+      {activeTab === 'stats' && (() => {
+        const nationwideAgg = aggregateGlobalStatsFromSheds(normalizedSheds);
+        const totalCap = nationwideAgg.totalCapacity || SHED_CAPACITY * 5;
+        const totalHens = nationwideAgg.totalActiveHens || 0;
+        const totalMort = nationwideAgg.totalMortality || 0;
+
+        return (
+          <div className="space-y-6">
+            {/* Nationwide Aggregated Live Production Overview */}
+            <div className="rounded-3xl border border-[#d4af37]/40 bg-[#0a2618]/95 p-5 sm:p-7 shadow-2xl backdrop-blur-md space-y-5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#d4af37]/20 pb-4">
+                <div>
+                  <div className="flex items-center gap-2.5">
+                    <Activity className="h-6 w-6 text-[#d4af37]" />
+                    <h3 className="text-lg font-extrabold text-[#f4efe6]">
+                      {strings.globalShedBreakdownTitle}
+                    </h3>
+                  </div>
+                  <p className="text-xs text-[#f4efe6]/65 mt-1">
+                    {isUr
+                      ? `تمام 5 شیڈز (شیڈ 101 تا شیڈ 105 • کل گنجائش ${totalCap.toLocaleString()} مرغیاں) سے خودکار جمع شدہ پیداوار، ٹوٹے انڈے اور خالص تازہ انڈے۔`
+                      : `Transparent farm-wide production aggregated automatically across Shed-101 to Shed-105 (${totalCap.toLocaleString()} total capacity).`}
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleSyncStatsFromSheds}
+                  disabled={isSyncingStatsFromSheds}
+                  className="flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-[#d4af37] via-[#f3df88] to-[#d4af37] px-4 py-2.5 text-xs font-black text-[#051a10] hover:brightness-105 active:scale-95 transition-all cursor-pointer shadow-lg shadow-[#d4af37]/20 disabled:opacity-50 shrink-0"
+                >
+                  <RefreshCw className={`h-4 w-4 ${isSyncingStatsFromSheds ? 'animate-spin' : ''}`} />
+                  <span>{strings.syncStatsFromShedsBtn}</span>
+                </button>
               </div>
 
-              <div className="rounded-2xl border border-[#d4af37]/20 bg-[#051a10]/70 p-3.5">
-                <span className="text-[10px] uppercase font-bold text-[#f3df88]/80 block mb-1">
-                  {strings.shedAvailableSlots}
-                </span>
-                <span className="text-xl sm:text-2xl font-black text-emerald-400">
-                  {Math.max(0, SHED_CAPACITY - selectedShed.totalHens).toLocaleString()}
-                </span>
+              {statsSyncMessage && (
+                <div className="flex items-center gap-2 rounded-xl border border-emerald-500/50 bg-emerald-950/70 p-3 text-xs text-emerald-200 font-semibold">
+                  <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
+                  <span>{statsSyncMessage}</span>
+                </div>
+              )}
+
+              {/* 5 Nationwide KPI Boxes */}
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 text-center">
+                <div className="rounded-2xl border border-[#d4af37]/25 bg-[#051a10]/80 p-3.5">
+                  <span className="text-[10px] uppercase font-bold text-[#f3df88]/80 block mb-1">
+                    {strings.statActiveHens}
+                  </span>
+                  <span className="text-xl font-black text-[#f3df88] font-mono">
+                    {totalHens.toLocaleString()}
+                  </span>
+                  <span className="text-[10px] text-[#f4efe6]/50 block font-mono">
+                    / {totalCap.toLocaleString()}
+                  </span>
+                </div>
+
+                <div className="rounded-2xl border border-[#d4af37]/25 bg-[#051a10]/80 p-3.5">
+                  <span className="text-[10px] uppercase font-bold text-[#f4efe6]/70 block mb-1">
+                    {strings.statTotalCollected}
+                  </span>
+                  <span className="text-xl font-black text-[#d4af37] font-mono">
+                    {nationwideAgg.totalCollected.toLocaleString()}
+                  </span>
+                </div>
+
+                <div className="rounded-2xl border border-amber-500/25 bg-[#051a10]/80 p-3.5">
+                  <span className="text-[10px] uppercase font-bold text-amber-300/80 block mb-1">
+                    {strings.statCracked}
+                  </span>
+                  <span className="text-xl font-black text-amber-300 font-mono">
+                    {nationwideAgg.cracked.toLocaleString()}
+                  </span>
+                </div>
+
+                <div className="rounded-2xl border border-emerald-500/25 bg-[#051a10]/80 p-3.5">
+                  <span className="text-[10px] uppercase font-bold text-emerald-300/80 block mb-1">
+                    {strings.statNetFresh}
+                  </span>
+                  <span className="text-xl font-black text-emerald-300 font-mono">
+                    {nationwideAgg.netFresh.toLocaleString()}
+                  </span>
+                </div>
+
+                <div className="rounded-2xl border border-rose-500/25 bg-[#051a10]/80 p-3.5">
+                  <span className="text-[10px] uppercase font-bold text-rose-300/80 block mb-1">
+                    {strings.statMortality}
+                  </span>
+                  <span className="text-xl font-black text-rose-400 font-mono">
+                    {totalMort.toLocaleString()}
+                  </span>
+                </div>
               </div>
 
-              <div className="rounded-2xl border border-[#d4af37]/20 bg-[#051a10]/70 p-3.5">
-                <span className="text-[10px] uppercase font-bold text-rose-300/80 block mb-1">
-                  {strings.shedMortalityTotal}
-                </span>
-                <span className="text-xl sm:text-2xl font-black text-rose-400">
-                  {(selectedShed.mortalityCount || 0).toLocaleString()}
-                </span>
-              </div>
-
-              <div className="rounded-2xl border border-[#d4af37]/20 bg-[#051a10]/70 p-3.5">
-                <span className="text-[10px] uppercase font-bold text-amber-300/80 block mb-1">
-                  {isUr ? 'ٹوٹے ہوئے انڈے (تعداد)' : 'Cracked Eggs (Count)'}
-                </span>
-                <span className="text-xl sm:text-2xl font-black text-amber-300">
-                  {typeof selectedShed.crackedEggsCount === 'number'
-                    ? selectedShed.crackedEggsCount
-                    : Math.round(((selectedShed.totalHens || 5000) * (selectedShed.crackedEggRate || 0)) / 100)}{' '}
-                  <span className="text-xs font-semibold text-amber-400/80">Eggs</span>
-                </span>
+              {/* Per-Shed Breakdown Table (Shed-101 to Shed-105) */}
+              <div className="overflow-x-auto rounded-2xl border border-[#d4af37]/20 bg-[#051a10]/70 p-3.5">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-[#d4af37]/20 text-[10px] uppercase text-[#f3df88]/80">
+                      <th className="py-2 pr-3">Shed</th>
+                      <th className="py-2 px-2">{strings.shedCurrentHens}</th>
+                      <th className="py-2 px-2">{strings.statTotalCollected}</th>
+                      <th className="py-2 px-2">{strings.statCracked}</th>
+                      <th className="py-2 px-2">{strings.statNetFresh}</th>
+                      <th className="py-2 pl-2 text-right">{strings.statMortality}</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/5 font-mono">
+                    {normalizedSheds.map((s) => {
+                      const sCracked = getShedCrackedEggsCount(s);
+                      const sEggs = Number(s.dailyEggCollection) || Number(s.totalHens) || 0;
+                      const sFresh = Math.max(0, sEggs - sCracked);
+                      return (
+                        <tr key={s.id} className="hover:bg-white/5">
+                          <td className="py-2 pr-3 font-black text-[#f3df88]">{s.id}</td>
+                          <td className="py-2 px-2 text-[#f4efe6]">{(s.totalHens || 0).toLocaleString()}</td>
+                          <td className="py-2 px-2 text-[#d4af37] font-bold">{sEggs.toLocaleString()}</td>
+                          <td className="py-2 px-2 text-amber-300">{sCracked.toLocaleString()}</td>
+                          <td className="py-2 px-2 text-emerald-300 font-bold">{sFresh.toLocaleString()}</td>
+                          <td className="py-2 pl-2 text-right text-rose-300">{(s.mortalityCount || 0).toLocaleString()}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
               </div>
             </div>
 
-            {/* Action Forms Grid */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 pt-2">
-              {/* 1. Mortality Input Form */}
-              <div className="rounded-2xl border border-rose-500/30 bg-[#051a10]/80 p-5 space-y-3.5">
-                <div className="flex items-center gap-2">
-                  <HeartPulse className="h-5 w-5 text-rose-400" />
-                  <h5 className="text-sm font-bold text-[#f4efe6]">
-                    {strings.mortalityInputLabel}
-                  </h5>
-                </div>
+            {/* Manual Global Override Card */}
+            <div className="rounded-3xl border border-[#d4af37]/40 bg-[#0a2618]/95 p-6 sm:p-7 shadow-2xl backdrop-blur-md max-w-xl mx-auto space-y-5">
+              <div className="space-y-1">
+                <h3 className="text-lg font-bold text-[#f4efe6]">
+                  {isUr ? 'گلوبل فارم انڈے پروڈکشن کی دستی اپ ڈیٹ' : 'Manual Global Egg Production Override'}
+                </h3>
                 <p className="text-xs text-[#f4efe6]/60">
-                  {strings.mortalityExplanation}
-                </p>
-                <form onSubmit={handleApplyMortality} className="space-y-3">
-                  <div>
-                    <input
-                      type="number"
-                      min="1"
-                      max={selectedShed.totalHens || 1}
-                      disabled={selectedShed.totalHens <= 0 || shedActionLoading}
-                      placeholder={strings.mortalityInputPlaceholder}
-                      value={mortalityDeathsInput}
-                      onChange={(e) => setMortalityDeathsInput(e.target.value)}
-                      className="w-full rounded-xl border border-rose-500/30 bg-[#0a2618] px-3.5 py-2.5 text-sm text-[#f4efe6] focus:border-rose-400 focus:outline-none font-mono"
-                    />
-                  </div>
-                  <button
-                    type="submit"
-                    disabled={selectedShed.totalHens <= 0 || shedActionLoading || !mortalityDeathsInput}
-                    className="w-full rounded-xl bg-gradient-to-r from-rose-700 to-rose-600 py-2.5 px-4 text-xs font-bold text-white hover:brightness-110 active:scale-98 transition-all cursor-pointer shadow-md disabled:opacity-50"
-                  >
-                    {strings.applyMortalityBtn}
-                  </button>
-                </form>
-              </div>
-
-              {/* 2. Cracked Eggs Raw Number Update Form (Requirement 3: Raw Number, e.g. 8) */}
-              <div className="rounded-2xl border border-amber-500/30 bg-[#051a10]/80 p-5 space-y-3.5">
-                <div className="flex items-center gap-2">
-                  <Sparkles className="h-5 w-5 text-amber-400" />
-                  <h5 className="text-sm font-bold text-[#f4efe6]">
-                    {isUr ? 'ٹوٹے ہوئے انڈوں کی تعداد (Raw Number)' : 'Number of Cracked Eggs (Raw Number)'}
-                  </h5>
-                </div>
-                <p className="text-xs text-[#f4efe6]/60 leading-relaxed">
                   {isUr
-                    ? 'اس شیڈ میں ٹوٹے ہوئے انڈوں کی اصل تعداد درج کریں (مثلاً: 8)۔ کوئی فیصد حساب نہیں ہے۔ مالی نقصان (تعداد × 30 روپے) تمام سرمایہ کاروں کے یومیہ انڈوں کے منافع سے منہا ہو گا۔'
-                    : 'Enter the raw number of cracked eggs for this shed (e.g. 8). Total loss (Count × Rs. 30) is divided proportionally among investors in this shed and deducted from daily collection profit.'}
+                    ? 'ایڈمن کے درج کردہ اعدادوشمار تمام صارفین کے ڈیش بورڈ پر براہِ راست لائیو فارم گلوبل ڈیٹا کے طور پر ظاہر ہوں گے۔'
+                    : 'Inputs here display live to all users on their dashboard as Nationwide Farm Global Stats.'}
                 </p>
-                <form onSubmit={handleUpdateCracking} className="space-y-3">
-                  <div>
-                    <input
-                      type="number"
-                      step="1"
-                      min="0"
-                      disabled={shedActionLoading}
-                      placeholder="e.g. 8"
-                      value={crackedRateInput}
-                      onChange={(e) => setCrackedRateInput(e.target.value)}
-                      className="w-full rounded-xl border border-amber-500/30 bg-[#0a2618] px-3.5 py-2.5 text-sm text-[#f4efe6] focus:border-amber-400 focus:outline-none font-mono"
-                    />
-                  </div>
-                  <button
-                    type="submit"
-                    disabled={shedActionLoading}
-                    className="w-full rounded-xl bg-gradient-to-r from-[#d4af37] to-[#b38f20] py-2.5 px-4 text-xs font-bold text-[#051a10] hover:brightness-110 active:scale-98 transition-all cursor-pointer shadow-md"
-                  >
-                    {isUr ? 'ٹوٹے ہوئے انڈے محفوظ کریں' : 'Save Cracked Eggs Count'}
-                  </button>
-                </form>
               </div>
+
+              {statsSuccess && (
+                <div className="flex items-center gap-2 rounded-xl border border-emerald-500/50 bg-emerald-950/70 p-3 text-xs text-emerald-200">
+                  <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+                  <span>{isUr ? 'اعدادوشمار کامیابی سے اپ ڈیٹ ہو گئے!' : 'Stats updated globally!'}</span>
+                </div>
+              )}
+
+              <form onSubmit={handleUpdateStats} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-[#f3df88] mb-1">
+                    {strings.statTotalCollected} (Eggs) *
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    required
+                    value={totalCollectedInput}
+                    onChange={(e) => setTotalCollectedInput(e.target.value)}
+                    className="w-full rounded-xl border border-[#d4af37]/30 bg-[#051a10] py-2.5 px-3.5 text-sm font-mono text-[#f4efe6] focus:border-[#d4af37] focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-[#f3df88] mb-1">
+                    {strings.statCracked} (Eggs) *
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    required
+                    value={crackedInput}
+                    onChange={(e) => setCrackedInput(e.target.value)}
+                    className="w-full rounded-xl border border-[#d4af37]/30 bg-[#051a10] py-2.5 px-3.5 text-sm font-mono text-[#f4efe6] focus:border-[#d4af37] focus:outline-none"
+                  />
+                </div>
+
+                <div className="rounded-2xl bg-[#051a10] p-4 border border-[#d4af37]/20 flex items-center justify-between">
+                  <span className="text-xs font-semibold text-[#f4efe6]/80">{strings.statNetFresh}:</span>
+                  <span className="text-xl font-black text-[#d4af37] font-mono">
+                    {Math.max(0, (parseInt(totalCollectedInput, 10) || 0) - (parseInt(crackedInput, 10) || 0)).toLocaleString()} Eggs
+                  </span>
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-[#d4af37] via-[#f3df88] to-[#d4af37] py-3 text-sm font-black text-[#051a10] hover:brightness-105 active:scale-98 transition-all cursor-pointer shadow-lg shadow-[#d4af37]/20"
+                >
+                  <Sparkles className="h-4 w-4" />
+                  <span>{strings.updateStatsBtn}</span>
+                </button>
+              </form>
             </div>
           </div>
-        </div>
-      )}
-
-      {/* TAB: LIVE STATS INPUT */}
-      {activeTab === 'stats' && (
-        <div className="rounded-3xl border border-[#d4af37]/40 bg-[#0a2618]/95 p-6 sm:p-7 shadow-2xl backdrop-blur-md max-w-xl mx-auto space-y-5">
-          <div className="space-y-1">
-            <h3 className="text-lg font-bold text-[#f4efe6]">
-              {isUr ? 'گلوبل فارم انڈے پروڈکشن کی تازہ ترین اپ ڈیٹ' : 'Update Global Egg Production Records'}
-            </h3>
-            <p className="text-xs text-[#f4efe6]/60">
-              {isUr
-                ? 'ایڈمن کے درج کردہ اعدادوشمار تمام صارفین کے ڈیش بورڈ پر براہِ راست لائیو فارم گلوبل ڈیٹا کے طور پر ظاہر ہوں گے۔'
-                : 'Inputs here display live to all users on their dashboard as Nationwide Farm Global Stats.'}
-            </p>
-          </div>
-
-          {statsSuccess && (
-            <div className="flex items-center gap-2 rounded-xl border border-emerald-500/50 bg-emerald-950/70 p-3 text-xs text-emerald-200">
-              <CheckCircle2 className="h-4 w-4 text-emerald-400" />
-              <span>{isUr ? 'اعدادوشمار کامیابی سے اپ ڈیٹ ہو گئے!' : 'Stats updated globally!'}</span>
-            </div>
-          )}
-
-          <form onSubmit={handleUpdateStats} className="space-y-4">
-            <div>
-              <label className="block text-xs font-semibold text-[#f3df88] mb-1">
-                {strings.statTotalCollected} (Eggs) *
-              </label>
-              <input
-                type="number"
-                min="0"
-                required
-                value={totalCollectedInput}
-                onChange={(e) => setTotalCollectedInput(e.target.value)}
-                className="w-full rounded-xl border border-[#d4af37]/30 bg-[#051a10] py-2.5 px-3.5 text-sm font-mono text-[#f4efe6] focus:border-[#d4af37] focus:outline-none"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-[#f3df88] mb-1">
-                {strings.statCracked} (Eggs) *
-              </label>
-              <input
-                type="number"
-                min="0"
-                required
-                value={crackedInput}
-                onChange={(e) => setCrackedInput(e.target.value)}
-                className="w-full rounded-xl border border-[#d4af37]/30 bg-[#051a10] py-2.5 px-3.5 text-sm font-mono text-[#f4efe6] focus:border-[#d4af37] focus:outline-none"
-              />
-            </div>
-
-            <div className="rounded-2xl bg-[#051a10] p-4 border border-[#d4af37]/20 flex items-center justify-between">
-              <span className="text-xs font-semibold text-[#f4efe6]/80">{strings.statNetFresh}:</span>
-              <span className="text-xl font-black text-[#d4af37]">
-                {Math.max(0, (parseInt(totalCollectedInput, 10) || 0) - (parseInt(crackedInput, 10) || 0))} Eggs
-              </span>
-            </div>
-
-            <button
-              type="submit"
-              className="w-full flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-[#d4af37] via-[#f3df88] to-[#d4af37] py-3 text-sm font-black text-[#051a10] hover:brightness-105 active:scale-98 transition-all cursor-pointer shadow-lg shadow-[#d4af37]/20"
-            >
-              <Sparkles className="h-4 w-4" />
-              <span>{strings.updateStatsBtn}</span>
-            </button>
-          </form>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Requirement 4: Send Official Message Modal */}
       {messageModalTarget && (

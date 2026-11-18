@@ -1,12 +1,19 @@
 import React, { useState, useEffect } from 'react';
-import { UserAccount, EggCollectionRecord } from '../types/farm';
-import { checkCollectionEligibility, calculateCycleEligibleHens, isUserLocked } from '../utils/farmRules';
+import { UserAccount, EggCollectionRecord, FarmShed, ShedCollectionBreakdown } from '../types/farm';
+import {
+  checkCollectionEligibility,
+  calculateCycleEligibleHens,
+  isUserLocked,
+  INITIAL_SHEDS,
+  calculateMultiShedCollectionYield,
+} from '../utils/farmRules';
 import { apiCollectEggs } from '../services/api';
 import { t } from '../utils/translations';
 import { Egg, Clock, Sparkles, CheckCircle2, AlertCircle, ShieldAlert } from 'lucide-react';
 
 interface CollectEggCardProps {
   user: UserAccount;
+  sheds?: FarmShed[];
   onCollected: (record: EggCollectionRecord, updatedUser: UserAccount) => void;
   onExplorePackages: () => void;
   lang: 'en' | 'ur';
@@ -17,6 +24,7 @@ interface CollectEggCardProps {
 
 export const CollectEggCard: React.FC<CollectEggCardProps> = ({
   user,
+  sheds = INITIAL_SHEDS,
   onCollected,
   onExplorePackages,
   lang,
@@ -27,12 +35,14 @@ export const CollectEggCard: React.FC<CollectEggCardProps> = ({
   const strings = t[lang];
   const isUr = lang === 'ur';
 
-  const [ticker, setTicker] = useState(0);
+  const [, setTicker] = useState(0);
   const [successInfo, setSuccessInfo] = useState<{
     eggs: number;
     cash: number;
     normalIncome?: number;
     shedLossDeduction?: number;
+    crackedEggsLost?: number;
+    shedBreakdown?: ShedCollectionBreakdown[];
     missedDays?: number;
     totalProfit?: number;
   } | null>(null);
@@ -56,9 +66,14 @@ export const CollectEggCard: React.FC<CollectEggCardProps> = ({
   );
 
   const eligibility = checkCollectionEligibility(user.activeHens, user.lastEggCollectionAt, new Date());
-  // Requirement 3: STRICT 1:1 EGG YIELD MATH (1 Active Hen = Exactly 1 Egg per day)
+  // Multi-Shed Mudarabah proportional yield preview
+  const multiShedYield = calculateMultiShedCollectionYield(
+    { activeHens: user.activeHens, packages: user.packages },
+    sheds,
+    new Date()
+  );
   const effectiveEggs = user.activeHens;
-  const effectiveCash = effectiveEggs * 30;
+  const effectiveNetCash = multiShedYield.finalWalletCredit;
 
   const handleCollect = async () => {
     if (!eligibility.canCollect || collecting || userLocked) return;
@@ -72,6 +87,8 @@ export const CollectEggCard: React.FC<CollectEggCardProps> = ({
         cash: res.record.cashEarned,
         normalIncome: res.record.normalIncome,
         shedLossDeduction: res.record.shedLossDeduction,
+        crackedEggsLost: res.record.crackedEggsLost,
+        shedBreakdown: res.record.shedBreakdown,
         missedDays: res.missedDays,
         totalProfit: res.totalProfit,
       });
@@ -157,17 +174,35 @@ export const CollectEggCard: React.FC<CollectEggCardProps> = ({
               </div>
 
               {successInfo.shedLossDeduction && successInfo.shedLossDeduction > 0 ? (
-                <div className="text-xs space-y-0.5 bg-emerald-900/40 p-2.5 rounded-xl border border-emerald-500/30">
+                <div className="text-xs space-y-1 bg-emerald-900/40 p-2.5 rounded-xl border border-emerald-500/30">
                   <div className="flex items-center justify-between text-[#f4efe6]/80">
                     <span>{isUr ? 'معمول کی آمدن (1:1 شرح):' : 'Normal Gross Income (1:1):'}</span>
                     <span className="font-semibold text-emerald-300">Rs. {successInfo.normalIncome?.toLocaleString()}</span>
                   </div>
                   <div className="flex items-center justify-between text-amber-300/90">
-                    <span>{isUr ? 'فلاک کی قدرتی شرح نقصان میں حصہ:' : 'Proportional Shed Loss Share:'}</span>
+                    <span>
+                      {isUr
+                        ? `شیڈ کے ٹوٹے انڈوں میں متناسب کٹوتی${successInfo.crackedEggsLost ? ` (${successInfo.crackedEggsLost} انڈے)` : ''}:`
+                        : `Proportional Cracked-Egg Loss${successInfo.crackedEggsLost ? ` (${successInfo.crackedEggsLost} eggs)` : ''}:`}
+                    </span>
                     <span className="font-semibold text-rose-300">-Rs. {successInfo.shedLossDeduction.toLocaleString()}</span>
                   </div>
+                  {successInfo.shedBreakdown && successInfo.shedBreakdown.length > 0 && (
+                    <div className="pt-1 border-t border-emerald-500/20 space-y-0.5 text-[11px] text-[#f3df88]/80">
+                      {successInfo.shedBreakdown.map((sb) => (
+                        <div key={sb.shedId} className="flex items-center justify-between font-mono">
+                          <span>{sb.shedId} ({sb.userHensInShed}/{sb.shedTotalHens} hens)</span>
+                          <span>
+                            {sb.lossDeductionRs > 0
+                              ? `-${sb.userCrackedEggsLost} eggs (-Rs. ${sb.lossDeductionRs.toLocaleString()})`
+                              : '0 loss'}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   <div className="flex items-center justify-between border-t border-emerald-500/30 pt-1 font-bold text-white">
-                    <span>{isUr ? 'والٹ میں شامل حتمی رقم:' : 'Final Added to Wallet:'}</span>
+                    <span>{isUr ? 'والٹ میں شامل حتمی رقم:' : 'Final Net Credited to Wallet:'}</span>
                     <span className="text-[#f3df88] text-sm font-black">+Rs. {((successInfo.totalProfit || successInfo.cash)).toLocaleString()}</span>
                   </div>
                 </div>
@@ -248,7 +283,7 @@ export const CollectEggCard: React.FC<CollectEggCardProps> = ({
 
         {/* State 3: Has hens, healthy, ready to collect */}
         {!userLocked && user.activeHens > 0 && !hasUnpaidMedical && eligibility.canCollect && (
-          <div className="pt-2 space-y-2">
+          <div className="pt-2 space-y-2.5">
             <button
               onClick={handleCollect}
               disabled={collecting}
@@ -257,11 +292,32 @@ export const CollectEggCard: React.FC<CollectEggCardProps> = ({
               <Egg className="h-6 w-6 sm:h-7 sm:w-7 text-[#051a10] group-hover:scale-110 transition-transform" />
               <span>
                 {isUr
-                  ? `ابھی ${effectiveEggs} انڈے وصول کریں (+Rs. ${effectiveCash})`
-                  : `Collect Now: ${effectiveEggs} Eggs (+Rs. ${effectiveCash})`}
+                  ? `ابھی ${effectiveEggs} انڈے وصول کریں (+Rs. ${effectiveNetCash.toLocaleString()})`
+                  : `Collect Now: ${effectiveEggs} Eggs (+Rs. ${effectiveNetCash.toLocaleString()})`}
               </span>
               <Sparkles className="h-5 w-5 text-[#051a10] group-hover:rotate-12 transition-transform" />
             </button>
+            {multiShedYield.hasLoss && (
+              <div className="rounded-xl border border-amber-500/35 bg-[#051a10]/80 px-3.5 py-2.5 text-[11px] space-y-1">
+                <div className="flex items-center justify-between text-amber-300 font-bold">
+                  <span>
+                    {isUr
+                      ? 'شرعی مضاربہ متناسب کٹوتی (ٹوٹے انڈے):'
+                      : 'Mudarabah Proportional Cracked-Egg Adjustment:'}
+                  </span>
+                  <span className="font-mono text-rose-300">
+                    -{multiShedYield.totalCrackedEggsLost} {isUr ? 'انڈے' : 'Eggs'} (-Rs. {multiShedYield.userShareOfLoss.toLocaleString()})
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-2 text-[10px] text-[#f4efe6]/70 font-mono">
+                  {multiShedYield.perShedBreakdown.map((sb) => (
+                    <span key={sb.shedId} className="rounded-md bg-[#0a2618] border border-[#d4af37]/20 px-2 py-0.5">
+                      {sb.shedId}: {sb.userHensInShed}/{sb.shedTotalHens} hens → Net Rs. {sb.netCreditRs.toLocaleString()}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
             {midCycleHens > 0 && (
               <p className="text-center text-[11px] text-[#f3df88]/80 font-medium">
                 {strings.midCycleHensNoteFooter}

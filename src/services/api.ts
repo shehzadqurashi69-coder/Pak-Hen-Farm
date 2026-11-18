@@ -29,6 +29,7 @@ import {
   cloudCollectEggs,
   cloudGetCollections,
   cloudUpdateStats,
+  cloudSyncGlobalStatsFromSheds,
   cloudCreateTicket,
   cloudReplyTicket,
   subscribeToOrders,
@@ -42,6 +43,7 @@ import {
   cloudMarkAlertsAsRead,
   cloudApplyShedMortality,
   cloudUpdateShedCracking,
+  cloudUpdateShedDailyLog,
   cloudDeclareShedSickness,
   cloudPayMedicalFee,
   cloudSetUserStatus,
@@ -97,6 +99,8 @@ export {
   cloudToggleTicketRead,
   cloudApplyShedMortality,
   cloudUpdateShedCracking,
+  cloudUpdateShedDailyLog,
+  cloudSyncGlobalStatsFromSheds,
   cloudDeclareShedSickness,
   cloudPayMedicalFee,
   cloudSubmitMedicalPaymentTid,
@@ -302,6 +306,10 @@ export async function apiUpdateStats(
   return await cloudUpdateStats(stats);
 }
 
+export async function apiSyncGlobalStatsFromSheds(_adminUser: UserAccount): Promise<GlobalFarmStats> {
+  return await cloudSyncGlobalStatsFromSheds();
+}
+
 // ---------------- SUPPORT TICKETS ----------------
 
 export async function apiGetTickets(user: UserAccount): Promise<SupportTicket[]> {
@@ -342,6 +350,14 @@ export async function apiApplyShedMortality(
 
 export async function apiUpdateShedCracking(_adminUser: UserAccount, shedId: string, crackedEggsCount: number): Promise<void> {
   await cloudUpdateShedCracking(shedId, crackedEggsCount);
+}
+
+export async function apiUpdateShedDailyLog(
+  _adminUser: UserAccount,
+  shedId: string,
+  log: { dailyEggCollection?: number; crackedEggsCount: number }
+): Promise<FarmShed> {
+  return await cloudUpdateShedDailyLog(shedId, log);
 }
 
 export async function apiUpdatePaymentSettings(_adminUser: UserAccount, updates: { customGreeting?: string; customGreetingUr?: string }): Promise<void> {

@@ -76,6 +76,12 @@ import {
   isPaymentAccountActive,
   evaluateReferralMilestones,
   getReferralCommissionRateForPackage,
+  mergeAllSheds,
+  getUserActiveHensByShed,
+  calculateMultiShedCollectionYield,
+  aggregateGlobalStatsFromSheds,
+  getShedCrackedEggsCount,
+  isPackageActive,
 } from '../utils/farmRules';
 
 // --------------------------------------------------------------------------------------
@@ -839,18 +845,17 @@ export async function cloudApproveOrder(order: HenOrder, adminNote?: string): Pr
   const now = new Date();
   const expiresAt = new Date(now.getTime() + PACKAGE_VALIDITY_DAYS * 24 * 60 * 60 * 1000).toISOString();
 
-  // Retrieve current sheds to assign hens to an available shed
+  // Retrieve current sheds to assign hens to an available shed (always covering Shed-101 to Shed-105)
   const shedsSnap = await getDocs(collection(db, 'sheds'));
-  let currentSheds: FarmShed[] = [];
+  const rawSheds: FarmShed[] = [];
   if (shedsSnap.empty) {
     for (const s of INITIAL_SHEDS) {
       await setDoc(doc(db, 'sheds', s.id), s);
     }
-    currentSheds = [...INITIAL_SHEDS];
   } else {
-    shedsSnap.forEach((d) => currentSheds.push(d.data() as FarmShed));
-    currentSheds.sort((a, b) => a.id.localeCompare(b.id));
+    shedsSnap.forEach((d) => rawSheds.push(d.data() as FarmShed));
   }
+  const currentSheds = mergeAllSheds(rawSheds);
 
   const assignedShedId = assignAvailableShed(currentSheds, order.hensCount);
 
@@ -867,14 +872,19 @@ export async function cloudApproveOrder(order: HenOrder, adminNote?: string): Pr
     shedId: assignedShedId,
   };
 
-  // Update shed capacity
+  // Update assigned shed capacity safely (setDoc merge ensures Shed-101..105 docs always exist)
   const targetShedRef = doc(db, 'sheds', assignedShedId);
-  const targetShedDoc = currentSheds.find((s) => s.id === assignedShedId);
+  const targetShedDoc = currentSheds.find((s) => s.id === assignedShedId) || INITIAL_SHEDS[0];
   const existingShedHens = targetShedDoc ? targetShedDoc.totalHens : 0;
-  await updateDoc(targetShedRef, {
-    totalHens: existingShedHens + order.hensCount,
-    lastUpdated: now.toISOString(),
-  });
+  await setDoc(
+    targetShedRef,
+    {
+      ...targetShedDoc,
+      totalHens: existingShedHens + order.hensCount,
+      lastUpdated: now.toISOString(),
+    },
+    { merge: true }
+  );
 
   // 1. Update Order in Firestore with commission mark and assigned shed
   await updateDoc(orderRef, {
@@ -967,6 +977,13 @@ export async function cloudApproveOrder(order: HenOrder, adminNote?: string): Pr
     } catch (commErr) {
       console.error('Failed to credit referral commission/milestone bonus:', commErr);
     }
+  }
+
+  // 4. Sync nationwide Global Farm Production Stats across all 5 sheds (Shed-101..105)
+  try {
+    await cloudSyncGlobalStatsFromSheds();
+  } catch (syncErr) {
+    console.warn('Non-blocking global stats sync after order approval:', syncErr);
   }
 }
 
@@ -1238,47 +1255,21 @@ export async function cloudCollectEggs(user: UserAccount): Promise<{ record: Egg
   const missedDays = Math.max(1, catchUp.missedDays);
   const cycleDates = catchUp.cycleDates.length > 0 ? catchUp.cycleDates : [now];
 
-  // 3. Strict 1:1 Egg Yield Math & Proportional Financial Loss Calculation:
-  // a) Visual 1:1 Egg Yield: 1 active hen strictly yields 1 egg (10 hens = 10 eggs, 125 hens = 125 eggs)
-  const eggs = exactActiveHens;
-  const normalIncome = eggs * EGG_PRICE_PKR; // (User's Active Hens * Rs. 30)
-
-  // Identify user's shed from active packages (default to primary Shed-101)
-  const userPackages = currentUser.packages || [];
-  const primaryShedId = userPackages.find((p) => p.active && p.shedId)?.shedId || 'Shed-101';
-
-  // Read current live shed data to determine shed dead hens and cracked eggs
-  let deadHens = 0;
-  let crackedEggs = 0;
-  let shedTotalHens = 5000;
-
+  // 3. Strict 1:1 Egg Yield Math & Multi-Shed Proportional Financial Loss Calculation:
+  // Read all sheds (Shed-101 to Shed-105) independently so multi-shed investors and single-shed
+  // investors get exact proportional deductions based strictly on their active hens in each shed.
+  let mergedSheds: FarmShed[] = INITIAL_SHEDS;
   try {
-    const shedRef = doc(db, 'sheds', primaryShedId);
-    const shedSnap = await getDoc(shedRef);
-    if (shedSnap.exists()) {
-      const sData = shedSnap.data() as FarmShed;
-      shedTotalHens = Math.max(exactActiveHens, sData.totalHens || 5000);
-      deadHens = sData.mortalityCount || 0;
-      // Requirement 3: Use raw number of cracked eggs directly, no percentage calculations
-      if (typeof sData.crackedEggsCount === 'number') {
-        crackedEggs = Math.max(0, sData.crackedEggsCount);
-      } else {
-        crackedEggs = Math.round((shedTotalHens * (sData.crackedEggRate || 0)) / 100);
-      }
-    }
+    const allShedsSnap = await getDocs(collection(db, 'sheds'));
+    const rawSheds: FarmShed[] = [];
+    allShedsSnap.forEach((d) => rawSheds.push(d.data() as FarmShed));
+    mergedSheds = mergeAllSheds(rawSheds);
   } catch (shedErr) {
-    console.warn('Could not read shed data for proportional loss calculation:', shedErr);
+    console.warn('Could not read sheds data for multi-shed proportional loss calculation:', shedErr);
   }
 
-  // Calculate proportional financial loss per daily collection cycle (cracked eggs deduction from daily collection).
-  const lossCalc = calculateProportionalFinancialLoss(
-    exactActiveHens,
-    0, // Mortality is handled directly on wallet balance; collection deducts cracked eggs
-    crackedEggs,
-    shedTotalHens,
-    HEN_REPLACEMENT_PRICE_PKR
-  );
-
+  const lossCalc = calculateMultiShedCollectionYield(userWithSyncedExpiry, mergedSheds, now);
+  const eggs = exactActiveHens;
   const finalCreditPerDay = lossCalc.finalWalletCredit;
   const totalProfitAdded = finalCreditPerDay * missedDays;
   const allRecords: EggCollectionRecord[] = [];
@@ -1295,14 +1286,16 @@ export async function cloudCollectEggs(user: UserAccount): Promise<{ record: Egg
       hensCount: exactActiveHens,
       eggsCollected: eggs, // Strict 1:1 visual yield
       cashEarned: finalCreditPerDay,
-      crackedDeduction: 0,
+      crackedDeduction: lossCalc.userShareOfLoss,
+      crackedEggsLost: lossCalc.totalCrackedEggsLost,
       normalIncome: lossCalc.normalIncome,
       shedLossDeduction: lossCalc.userShareOfLoss,
       finalCredit: finalCreditPerDay,
       totalShedLossRs: lossCalc.totalShedLossRs,
       lossPerHen: lossCalc.lossPerHen,
-      shedDeadHens: deadHens,
-      shedCrackedEggs: crackedEggs,
+      shedDeadHens: lossCalc.totalShedDeadHens,
+      shedCrackedEggs: lossCalc.totalShedCrackedEggs,
+      shedBreakdown: lossCalc.perShedBreakdown,
     };
     await setDoc(doc(db, 'collections', recId), record);
     allRecords.push(record);
@@ -1375,8 +1368,37 @@ export async function cloudUpdateStats(stats: { totalCollected: number; cracked:
     ...stats,
     lastUpdated: new Date().toISOString(),
   };
-  await setDoc(statsRef, data);
-  return data;
+  await setDoc(statsRef, data, { merge: true });
+  const snap = await getDoc(statsRef);
+  return snap.exists() ? (snap.data() as GlobalFarmStats) : data;
+}
+
+/**
+ * Aggregates live production, flock sizes (25,000 capacity), cracked eggs, net fresh eggs,
+ * and mortality across all 5 sheds (Shed-101 to Shed-105) and persists to stats/dailyProduction.
+ */
+export async function cloudSyncGlobalStatsFromSheds(): Promise<GlobalFarmStats> {
+  const now = new Date();
+  const [shedsSnap, usersSnap] = await Promise.all([
+    getDocs(collection(db, 'sheds')),
+    getDocs(collection(db, 'users')),
+  ]);
+
+  const rawSheds: FarmShed[] = [];
+  shedsSnap.forEach((d) => rawSheds.push(d.data() as FarmShed));
+
+  const allUsers: UserAccount[] = [];
+  usersSnap.forEach((d) => allUsers.push(d.data() as UserAccount));
+
+  const shedHensSum: Record<string, number> = {};
+  for (const s of INITIAL_SHEDS) {
+    shedHensSum[s.id] = calculateShedDynamicSum(s.id, allUsers, now);
+  }
+
+  const mergedSheds = mergeAllSheds(rawSheds, shedHensSum);
+  const aggregated = aggregateGlobalStatsFromSheds(mergedSheds);
+  await setDoc(doc(db, 'stats', 'dailyProduction'), aggregated, { merge: true });
+  return aggregated;
 }
 
 // ---------------- CLOUD SUPPORT TICKETS ----------------
@@ -1455,49 +1477,22 @@ export function subscribeToSheds(callback: (sheds: FarmShed[]) => void): Unsubsc
   const shedsRef = collection(db, 'sheds');
   const usersRef = collection(db, 'users');
 
-  // Helper function: calculates dynamic SUM of all active hens per shed from all users in the database
+  // Helper function: calculates dynamic SUM of all 90-day-active hens per shed (Shed-101 to Shed-105)
   const computeDynamicSheds = async (shedDocs: FarmShed[]): Promise<FarmShed[]> => {
-    // 1. Fetch current live users to compute dynamic SUM per shed
+    const now = new Date();
     const usersSnap = await getDocs(usersRef);
-    const shedHensSum: Record<string, number> = {
-      'Shed-101': 0,
-      'Shed-102': 0,
-      'Shed-103': 0,
-      'Shed-104': 0,
-      'Shed-105': 0,
-    };
+    const allUsers: UserAccount[] = [];
+    usersSnap.forEach((uDoc) => allUsers.push(uDoc.data() as UserAccount));
 
-    usersSnap.forEach((uDoc) => {
-      const u = uDoc.data() as UserAccount;
-      const pkgs = u.packages || [];
-      let totalPkgActiveHens = 0;
-      for (const p of pkgs) {
-        if (p.active && (p.hens || 0) > 0) {
-          totalPkgActiveHens += p.hens || 0;
-          const sId = p.shedId || 'Shed-101';
-          shedHensSum[sId] = (shedHensSum[sId] || 0) + (p.hens || 0);
-        }
-      }
-      // If user has activeHens in user doc greater than active packages sum (e.g. Minha having 125 hens in Shed-101)
-      const unallocatedHens = Math.max(0, (u.activeHens || 0) - totalPkgActiveHens);
-      if (unallocatedHens > 0) {
-        shedHensSum['Shed-101'] = (shedHensSum['Shed-101'] || 0) + unallocatedHens;
-      }
-    });
+    const shedHensSum: Record<string, number> = {};
+    for (const s of INITIAL_SHEDS) {
+      shedHensSum[s.id] = calculateShedDynamicSum(s.id, allUsers, now);
+    }
 
-    // 2. Map existing or initial sheds with dynamically computed SUM
-    const baseList = shedDocs.length > 0 ? shedDocs : INITIAL_SHEDS;
-    const computedList = baseList.map((s) => {
-      const liveSum = shedHensSum[s.id] ?? 0;
-      return {
-        ...s,
-        totalHens: liveSum,
-      };
-    });
+    // Merge all 5 canonical sheds (Shed-101 .. Shed-105) so every shed is tracked independently
+    const computedList = mergeAllSheds(shedDocs, shedHensSum);
 
-    computedList.sort((a, b) => a.id.localeCompare(b.id));
-
-    // 3. Persist dynamic SUM in Firestore shed docs so they never reset to 0
+    // Persist missing sheds or updated dynamic totals in Firestore
     for (const cShed of computedList) {
       try {
         const sRef = doc(db, 'sheds', cShed.id);
@@ -1506,9 +1501,13 @@ export function subscribeToSheds(callback: (sheds: FarmShed[]) => void): Unsubsc
           await setDoc(sRef, cShed);
         } else {
           const existingData = sSnap.data() as FarmShed;
-          if (existingData.totalHens !== cShed.totalHens) {
+          if (
+            existingData.totalHens !== cShed.totalHens ||
+            existingData.netFreshEggs !== cShed.netFreshEggs
+          ) {
             await updateDoc(sRef, {
               totalHens: cShed.totalHens,
+              netFreshEggs: cShed.netFreshEggs ?? Math.max(0, (existingData.dailyEggCollection ?? cShed.totalHens) - getShedCrackedEggsCount({ ...existingData, totalHens: cShed.totalHens })),
               lastUpdated: new Date().toISOString(),
             });
           }
@@ -1599,12 +1598,14 @@ export async function cloudApplyShedMortality(
     shedData = shedSnap.data() as FarmShed;
   }
 
-  // 1. Fetch all users to calculate dynamic sum of active hens in this shed
+  const now = new Date();
+
+  // 1. Fetch all users to calculate dynamic sum of 90-day-active hens in THIS shed strictly
   const usersSnap = await getDocs(collection(db, 'users'));
   const allUsers: UserAccount[] = [];
   usersSnap.forEach((d) => allUsers.push(d.data() as UserAccount));
 
-  const shedLiveHens = calculateShedDynamicSum(shedId, allUsers);
+  const shedLiveHens = calculateShedDynamicSum(shedId, allUsers, now);
   const currentTotal = Math.max(shedLiveHens, shedData.totalHens || 0);
   if (currentTotal <= 0) {
     throw new Error(`Shed ${shedId} currently has 0 active hens.`);
@@ -1616,37 +1617,21 @@ export async function cloudApplyShedMortality(
   // 3. Calculate Total Financial Loss: (Number of Dead Hens entered by Admin * Price per Hen)
   const totalFinancialLoss = deaths * henPrice;
 
-  // 4. Calculate Loss Per Hen: (Total Financial Loss / Total Active Hens in the Shed)
+  // 4. Calculate Loss Per Hen: (Total Financial Loss / Total Active Hens in THIS Shed)
   const lossPerHen = totalFinancialLoss / currentTotal;
-  const now = new Date();
 
-  // 5. Calculate User's Proportional Loss and deduct from Wallet Balance
+  // 5. Calculate each investor's proportional loss strictly from their active hens in THIS shed
   for (const userDoc of usersSnap.docs) {
     const userData = userDoc.data() as UserAccount;
-    const pkgs = userData.packages || [];
-    let userHensInShed = 0;
-
-    for (const p of pkgs) {
-      const pShed = p.shedId || 'Shed-101';
-      if (pShed === shedId && p.active && p.hens > 0) {
-        userHensInShed += p.hens;
-      }
-    }
-
-    // Default unallocated active hens to Shed-101
-    if (shedId === 'Shed-101' && (userData.activeHens || 0) > 0 && userHensInShed === 0) {
-      userHensInShed = userData.activeHens || 0;
-    }
+    const hensByShed = getUserActiveHensByShed(userData, now);
+    const userHensInShed = hensByShed[shedId] || 0;
 
     if (userHensInShed > 0) {
-      // 5. Calculate User's Proportional Loss: (User's Active Hens * Loss Per Hen)
       const userProportionalLoss = Math.round(userHensInShed * lossPerHen);
 
       if (userProportionalLoss > 0) {
-        // 6. Deduct "User's Proportional Loss" (in Rs) directly from the user's "Wallet Balance".
-        // CRITICAL RULE: Allow Wallet Balance to drop into negative numbers (e.g., -7 Rs) if balance is 0.
-        // Do NOT restrict or floor to 0. Negative balance acts as a due amount recovered from next egg profit.
-        // DO NOT deduct from user's "Active Hens" count. Live hen count remains unchanged for fractional losses.
+        // Deduct proportional financial loss directly from wallet (allowing negative due balance).
+        // CRITICAL MUDARABAH RULE: Do NOT deduct from user's Active Hens count.
         const currentBalance = Number(userData.walletBalance) || 0;
         const newWalletBalance = currentBalance - userProportionalLoss;
 
@@ -1654,7 +1639,6 @@ export async function cloudApplyShedMortality(
           walletBalance: newWalletBalance,
         });
 
-        // 7. Update Alert Notification: reflect financial deduction in wallet balance
         const alertId = 'ALERT-MORT-' + shedId + '-' + userData.id + '-' + Date.now();
         const alertDoc: UserAlert = {
           id: alertId,
@@ -1663,12 +1647,12 @@ export async function cloudApplyShedMortality(
           shedId: shedId,
           titleEn: 'Natural Flock Mortality Financial Loss',
           titleUr: 'قدرتی اموات مالی نقصان الرٹ',
-          messageEn: `Alert: Natural mortality in ${shedId}. A proportional financial loss of Rs. ${userProportionalLoss.toLocaleString()} has been deducted from your wallet balance to maintain Mudarabah partnership.`,
-          messageUr: `انتباہ: ${shedId} میں قدرتی شرح اموات۔ مضاربہ شراکت داری کے تحت آپ کے والیٹ بیلنس سے ${userProportionalLoss.toLocaleString()} روپے کا متناسب مالی نقصان منہا کر دیا گیا ہے۔`,
+          messageEn: `Alert: Natural mortality in ${shedId} (${deaths} hens across ${currentTotal.toLocaleString()} hens). Based on your ${userHensInShed.toLocaleString()} active hens in ${shedId}, a proportional financial loss of Rs. ${userProportionalLoss.toLocaleString()} has been deducted from your wallet balance.`,
+          messageUr: `انتباہ: ${shedId} میں قدرتی شرح اموات (${deaths} مرغیاں)۔ ${shedId} میں آپ کی ${userHensInShed.toLocaleString()} فعال مرغیوں کے تناسب سے ${userProportionalLoss.toLocaleString()} روپے کا مالی نقصان آپ کے والٹ بیلنس سے منہا کر دیا گیا ہے۔`,
           title: 'Natural Flock Mortality Financial Loss',
           titleUrdu: 'قدرتی اموات مالی نقصان الرٹ',
           message: `Alert: Natural mortality in ${shedId}. A proportional financial loss of Rs. ${userProportionalLoss.toLocaleString()} has been deducted from your wallet balance to maintain Mudarabah partnership.`,
-          messageUrdu: `انتباہ: ${shedId} میں قدرتی شرح اموات۔ مضاربہ شراکت داری کے تحت آپ کے والیٹ بیلنس سے ${userProportionalLoss.toLocaleString()} روپے کا متناسب مالی نقصان منہا کر دیا گیا ہے۔`,
+          messageUrdu: `انتباہ: ${shedId} میں قدرتی شرح اموات۔ مضاربہ شراکت داری کے تحت آپ کے والٹ بیلنس سے ${userProportionalLoss.toLocaleString()} روپے کا متناسب مالی نقصان منہا کر دیا گیا ہے۔`,
           financialLossDeducted: userProportionalLoss,
           amountDeducted: userProportionalLoss,
           percentageLoss: Math.round((deaths / currentTotal) * 1000) / 10,
@@ -1680,31 +1664,84 @@ export async function cloudApplyShedMortality(
     }
   }
 
-  // Update shed doc: record mortality count, keeping flock active
-  await updateDoc(shedRef, {
-    mortalityCount: (shedData.mortalityCount || 0) + deaths,
+  // Update ONLY this shed doc: record daily and cumulative mortality count, keeping flock active
+  await setDoc(
+    shedRef,
+    {
+      ...shedData,
+      totalHens: currentTotal,
+      dailyMortalityCount: deaths,
+      mortalityCount: (shedData.mortalityCount || 0) + deaths,
+      lastUpdated: now.toISOString(),
+    },
+    { merge: true }
+  );
+
+  try {
+    await cloudSyncGlobalStatsFromSheds();
+  } catch (statsErr) {
+    console.warn('Syncing global stats after mortality warning:', statsErr);
+  }
+}
+
+/**
+ * Updates daily egg collection and cracked/damaged eggs count for a single shed (Shed-101 to Shed-105)
+ * independently, computes netFreshEggs and crackedEggRate using the shed's real active hen count,
+ * and syncs Global Farm Production Stats across all 5 sheds.
+ */
+export async function cloudUpdateShedDailyLog(
+  shedId: string,
+  log: { dailyEggCollection?: number; crackedEggsCount: number }
+): Promise<FarmShed> {
+  const shedRef = doc(db, 'sheds', shedId);
+  const shedSnap = await getDoc(shedRef);
+  let baseShed = INITIAL_SHEDS.find((s) => s.id === shedId) || { ...INITIAL_SHEDS[0], id: shedId };
+  if (shedSnap.exists()) {
+    baseShed = { ...baseShed, ...(shedSnap.data() as FarmShed) };
+  }
+
+  // Compute live 90-day-active hens for this shed so rate/loss uses authentic hen count
+  const now = new Date();
+  const usersSnap = await getDocs(collection(db, 'users'));
+  const allUsers: UserAccount[] = [];
+  usersSnap.forEach((d) => allUsers.push(d.data() as UserAccount));
+  const liveHensInShed = calculateShedDynamicSum(shedId, allUsers, now);
+  const shedHens = Math.max(liveHensInShed, baseShed.totalHens || 0);
+
+  const cleanCracked = Math.max(0, Math.floor(Number(log.crackedEggsCount) || 0));
+  const cleanDailyCollection =
+    log.dailyEggCollection !== undefined && !isNaN(Number(log.dailyEggCollection))
+      ? Math.max(0, Math.floor(Number(log.dailyEggCollection)))
+      : typeof baseShed.dailyEggCollection === 'number'
+      ? Math.max(0, baseShed.dailyEggCollection)
+      : shedHens;
+  const netFresh = Math.max(0, cleanDailyCollection - cleanCracked);
+  const calculatedRate = shedHens > 0 ? Math.round((cleanCracked / shedHens) * 1000) / 10 : 0;
+
+  const updatedShed: FarmShed = {
+    ...baseShed,
+    totalHens: shedHens,
+    dailyEggCollection: cleanDailyCollection,
+    crackedEggsCount: cleanCracked,
+    netFreshEggs: netFresh,
+    crackedEggRate: calculatedRate,
     lastUpdated: now.toISOString(),
-  });
+  };
+
+  await setDoc(shedRef, updatedShed, { merge: true });
+
+  // Sync Global Farm Daily Production across all 5 sheds (Shed-101..Shed-105)
+  try {
+    await cloudSyncGlobalStatsFromSheds();
+  } catch (statsErr) {
+    console.warn('Syncing global stats from sheds warning:', statsErr);
+  }
+
+  return updatedShed;
 }
 
 export async function cloudUpdateShedCracking(shedId: string, crackedEggsCount: number): Promise<void> {
-  const shedRef = doc(db, 'sheds', shedId);
-  const shedSnap = await getDoc(shedRef);
-  let defaultShed = INITIAL_SHEDS.find((s) => s.id === shedId) || INITIAL_SHEDS[0];
-  if (!shedSnap.exists()) {
-    await setDoc(shedRef, defaultShed);
-  } else {
-    defaultShed = shedSnap.data() as FarmShed;
-  }
-  const cleanCount = Math.max(0, Math.floor(Number(crackedEggsCount) || 0));
-  const shedHens = Math.max(1, defaultShed.totalHens || 5000);
-  const calculatedRate = Math.round((cleanCount / shedHens) * 1000) / 10;
-
-  await updateDoc(shedRef, {
-    crackedEggsCount: cleanCount,
-    crackedEggRate: calculatedRate,
-    lastUpdated: new Date().toISOString(),
-  });
+  await cloudUpdateShedDailyLog(shedId, { crackedEggsCount });
 }
 
 export async function cloudDeclareShedSickness(shedId: string, isSick: boolean): Promise<void> {
