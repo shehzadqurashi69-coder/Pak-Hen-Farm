@@ -1,7 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import { UserAccount, HenPackage, HenOrder, PaymentAccount, PaymentSettings } from '../types/farm';
-import { PACKAGES, calculatePackagePrice, isUserLocked, filterActivePaymentMethods } from '../utils/farmRules';
-import { apiCreateOrder, subscribeToOrders, subscribeToPaymentMethods, subscribeToPaymentSettings } from '../services/api';
+import { PACKAGES, calculatePackagePrice, isUserLocked, filterActivePaymentMethods, validateOrderSubmissionPayload } from '../utils/farmRules';
+import { compressPaymentSlip, uploadPaymentSlipForOrder, formatSlipSize } from '../utils/slipCompression';
+import {
+  apiCreateOrder,
+  apiGetUserOrders,
+  apiGetPaymentMethods,
+  apiGetPaymentSettings,
+  getFriendlyErrorMessage,
+} from '../services/api';
 import { PaymentLogo } from './PaymentLogos';
 import { t } from '../utils/translations';
 import {
@@ -27,6 +34,7 @@ import {
   Landmark,
   Smartphone,
   FileCheck,
+  RefreshCw,
 } from 'lucide-react';
 
 interface PackagesViewProps {
@@ -48,8 +56,11 @@ export const PackagesView: React.FC<PackagesViewProps> = ({ user, onOrderPlaced,
   const [paymentMethods, setPaymentMethods] = useState<PaymentAccount[]>([]);
   const [selectedMethodId, setSelectedMethodId] = useState<string>('');
 
-  // Payment slip upload state
+  // Payment slip upload & compression state
   const [proofSlipBase64, setProofSlipBase64] = useState<string>('');
+  const [proofSlipFile, setProofSlipFile] = useState<File | null>(null);
+  const [proofSlipMeta, setProofSlipMeta] = useState<{ originalBytes: number; compressedBytes: number } | null>(null);
+  const [isCompressingSlip, setIsCompressingSlip] = useState(false);
   const [zoomImageUrl, setZoomImageUrl] = useState<string | null>(null);
 
   // Payment form state
@@ -61,41 +72,60 @@ export const PackagesView: React.FC<PackagesViewProps> = ({ user, onOrderPlaced,
   const [successMsg, setSuccessMsg] = useState('');
   const [userOrders, setUserOrders] = useState<HenOrder[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitStage, setSubmitStage] = useState<'' | 'uploading_slip' | 'saving_order'>('');
 
   const userLocked = isUserLocked(user);
 
   const [paymentSettings, setPaymentSettings] = useState<PaymentSettings | null>(null);
+  const [isRefreshingOrders, setIsRefreshingOrders] = useState(false);
 
   // Calculate dynamic price based on selected quantity
   const calculatedTotal = calculatePackagePrice(quantity);
 
+  const loadPackageViewData = async (forceRefresh: boolean = false) => {
+    if (forceRefresh && isRefreshingOrders) return;
+    if (forceRefresh) setIsRefreshingOrders(true);
+    try {
+      const [ordersRes, pmRes, settingsRes] = await Promise.allSettled([
+        apiGetUserOrders(user.id, forceRefresh),
+        apiGetPaymentMethods(forceRefresh),
+        apiGetPaymentSettings(forceRefresh),
+      ]);
+
+      if (ordersRes.status === 'fulfilled') {
+        setUserOrders(ordersRes.value);
+      }
+      if (pmRes.status === 'fulfilled') {
+        const activeMethods = filterActivePaymentMethods(pmRes.value);
+        setPaymentMethods(activeMethods);
+        setSelectedMethodId((prev) => {
+          if (activeMethods.length === 0) return '';
+          if (prev && activeMethods.some((m) => m.id === prev)) return prev;
+          return activeMethods[0].id;
+        });
+      }
+      if (settingsRes.status === 'fulfilled') {
+        setPaymentSettings(settingsRes.value);
+      }
+
+      const firstErr =
+        ordersRes.status === 'rejected'
+          ? ordersRes.reason
+          : pmRes.status === 'rejected'
+          ? pmRes.reason
+          : settingsRes.status === 'rejected'
+          ? settingsRes.reason
+          : null;
+      if (firstErr && forceRefresh) {
+        setErrorMsg(getFriendlyErrorMessage(firstErr, lang));
+      }
+    } finally {
+      if (forceRefresh) setIsRefreshingOrders(false);
+    }
+  };
+
   useEffect(() => {
-    // Live subscription to orders from Firebase Cloud Database
-    const unsubOrders = subscribeToOrders('user', user.id, (ords) => {
-      setUserOrders(ords);
-    });
-
-    // Live subscription to dynamic payment accounts set by Admin (strictly active only)
-    const unsubPm = subscribeToPaymentMethods((methods) => {
-      const activeMethods = filterActivePaymentMethods(methods);
-      setPaymentMethods(activeMethods);
-      setSelectedMethodId((prev) => {
-        if (activeMethods.length === 0) return '';
-        if (prev && activeMethods.some((m) => m.id === prev)) return prev;
-        return activeMethods[0].id;
-      });
-    });
-
-    // Live subscription to payment settings (Custom Admin Greeting)
-    const unsubSettings = subscribeToPaymentSettings((settings) => {
-      setPaymentSettings(settings);
-    });
-
-    return () => {
-      unsubOrders();
-      unsubPm();
-      unsubSettings();
-    };
+    loadPackageViewData(false);
   }, [user.id]);
 
   const activeMethod = paymentMethods.find((m) => m.id === selectedMethodId) || paymentMethods[0] || null;
@@ -118,37 +148,47 @@ export const PackagesView: React.FC<PackagesViewProps> = ({ user, onOrderPlaced,
     setQuantity((prev) => (prev > 1 ? prev - 1 : 1));
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    // Reset input value so re-selecting the same file after error/remove always triggers onChange
+    e.target.value = '';
     if (!file) return;
 
-    if (!file.type.startsWith('image/')) {
-      setErrorMsg(isUr ? 'براہ کرم تصویر والی فائل منتخب کریں (PNG/JPG/WebP)' : 'Please select an image file (PNG/JPG/WebP).');
-      return;
-    }
+    setErrorMsg('');
+    setIsCompressingSlip(true);
 
-    if (file.size > 8 * 1024 * 1024) {
-      setErrorMsg(isUr ? 'فائل کا سائز 8MB سے کم ہونا چاہیے' : 'File size must be under 8MB.');
-      return;
+    try {
+      const compressed = await compressPaymentSlip(file);
+      setProofSlipFile(compressed.compressedFile);
+      setProofSlipBase64(compressed.previewDataUrl);
+      setProofSlipMeta({
+        originalBytes: compressed.originalBytes,
+        compressedBytes: compressed.compressedBytes,
+      });
+    } catch (err: any) {
+      setProofSlipFile(null);
+      setProofSlipBase64('');
+      setProofSlipMeta(null);
+      setErrorMsg(
+        err?.message ||
+          (isUr
+            ? 'ادائیگی کی رسید کی تصویر درست نہیں ہے۔ براہ کرم PNG، JPG یا WebP اسکرین شاٹ منتخب کریں۔'
+            : 'Invalid payment slip image. Please select a valid PNG, JPG, or WebP screenshot.')
+      );
+    } finally {
+      setIsCompressingSlip(false);
     }
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        setProofSlipBase64(reader.result);
-        setErrorMsg('');
-      }
-    };
-    reader.readAsDataURL(file);
   };
 
   const handleRemoveProofSlip = () => {
     setProofSlipBase64('');
+    setProofSlipFile(null);
+    setProofSlipMeta(null);
   };
 
   const handleSubmitTid = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSubmitting) return; // Strict debouncing: block rapid clicks
+    if (isSubmitting || isCompressingSlip) return; // Strict debouncing: block rapid clicks
     setErrorMsg('');
     setSuccessMsg('');
 
@@ -170,17 +210,17 @@ export const PackagesView: React.FC<PackagesViewProps> = ({ user, onOrderPlaced,
     const cleanTitle = senderTitle.trim();
     const cleanNumber = senderNumber.trim();
 
-    if (!cleanTid) {
+    if (!cleanTid || cleanTid.length < 3) {
       setErrorMsg(
         isUr
-          ? 'براہ کرم ٹرانزیکشن ہیش / TID درج کریں۔'
-          : 'Please enter your Transaction ID (TxID) / Reference number.'
+          ? 'براہ کرم کم از کم 3 حروف یا ہندسوں پر مشتمل درست ٹرانزیکشن ہیش / TID درج کریں۔'
+          : 'Please enter a valid Transaction ID (TxID) / Reference number (at least 3 characters).'
       );
       return;
     }
 
     // MANDATORY REQUIREMENT: Payment Slip / Screenshot upload
-    if (!proofSlipBase64) {
+    if (!proofSlipBase64 || !proofSlipFile) {
       setErrorMsg(
         isUr
           ? 'براہ کرم ادائیگی کی رسید / اسکرین شاٹ لازمی اپ لوڈ کریں۔'
@@ -191,6 +231,23 @@ export const PackagesView: React.FC<PackagesViewProps> = ({ user, onOrderPlaced,
 
     try {
       setIsSubmitting(true);
+      setSubmitStage('uploading_slip');
+
+      // Step 1: Upload compressed slip to server (/uploads/slips/...) with automatic size-capped fallback
+      const uploadedSlip = await uploadPaymentSlipForOrder(proofSlipFile, proofSlipBase64);
+
+      // Step 2: Validate final order payload before saving to Firestore (works for 1 hen, Rs. 4,000, Rs. 8,000, 100 hens, etc.)
+      const validation = validateOrderSubmissionPayload({
+        hensCount: quantity,
+        amount: calculatedTotal,
+        tid: cleanTid,
+        proofSlipUrl: uploadedSlip.proofSlipUrl,
+      });
+      if (!validation.valid) {
+        throw new Error(isUr ? (validation.errorUr || validation.error) : validation.error);
+      }
+
+      setSubmitStage('saving_order');
       const order = await apiCreateOrder(user, {
         packageId: `partner-flock-${quantity}-hens`,
         hensCount: quantity,
@@ -200,23 +257,33 @@ export const PackagesView: React.FC<PackagesViewProps> = ({ user, onOrderPlaced,
         tid: cleanTid,
         paymentMethodId: activeMethod.id,
         paymentMethodTitle: activeMethod.title,
-        proofSlipUrl: proofSlipBase64,
+        proofSlipUrl: uploadedSlip.proofSlipUrl,
+        proofSlipSizeBytes: uploadedSlip.sizeBytes,
       });
 
-      setSuccessMsg(strings.orderSubmittedSuccess);
+      setUserOrders((prev) => [order, ...prev.filter((o) => o.id !== order.id)]);
+      setSuccessMsg(
+        isUr
+          ? `${strings.orderSubmittedSuccess} (${quantity} مرغیاں • Rs. ${calculatedTotal.toLocaleString()} • TID: ${cleanTid})`
+          : `${strings.orderSubmittedSuccess} (${quantity} ${quantity === 1 ? 'Hen' : 'Hens'} • PKR ${calculatedTotal.toLocaleString()} • TID: ${cleanTid})`
+      );
       onOrderPlaced(order);
       setTid('');
       setProofSlipBase64('');
-      setSenderTitle('');
-      setSenderNumber('');
+      setProofSlipFile(null);
+      setProofSlipMeta(null);
+      setSenderTitle(user.easypaisaTitle || '');
+      setSenderNumber(user.easypaisaNumber || '');
       setTimeout(() => {
         setCheckoutStep('select');
         setSuccessMsg('');
-      }, 3500);
+      }, 4000);
     } catch (err: any) {
-      setErrorMsg(err.message || 'Error submitting order');
+      console.error('Order submission error:', err);
+      setErrorMsg(getFriendlyErrorMessage(err, lang));
     } finally {
       setIsSubmitting(false);
+      setSubmitStage('');
     }
   };
 
@@ -272,11 +339,24 @@ export const PackagesView: React.FC<PackagesViewProps> = ({ user, onOrderPlaced,
                 <Minus className="h-6 w-6 sm:h-7 sm:w-7 stroke-[3]" />
               </button>
 
-              {/* Center Quantity Display */}
-              <div className="flex flex-col items-center min-w-[140px] sm:min-w-[180px] text-center select-none">
-                <span className="text-5xl sm:text-6xl font-black text-[#d4af37] font-serif tracking-tight drop-shadow-md">
-                  {quantity}
-                </span>
+              {/* Center Quantity Display (Supports direct numeric input for 1 to 100+ hens) */}
+              <div className="flex flex-col items-center min-w-[140px] sm:min-w-[180px] text-center">
+                <input
+                  type="number"
+                  min={1}
+                  max={5000}
+                  value={quantity}
+                  onChange={(e) => {
+                    const parsed = parseInt(e.target.value, 10);
+                    if (!Number.isNaN(parsed) && parsed >= 1) {
+                      setQuantity(Math.min(5000, parsed));
+                    } else if (e.target.value === '') {
+                      setQuantity(1);
+                    }
+                  }}
+                  aria-label={isUr ? 'مرغیوں کی تعداد' : 'Number of hens'}
+                  className="w-28 sm:w-36 bg-transparent text-center text-5xl sm:text-6xl font-black text-[#d4af37] font-serif tracking-tight drop-shadow-md focus:outline-none focus:ring-2 focus:ring-[#d4af37]/50 rounded-xl"
+                />
                 <span className="text-xs sm:text-sm font-bold uppercase tracking-wider text-[#f4efe6]/80 mt-1">
                   {quantity === 1
                     ? strings.hensCount.replace('{count}', '')
@@ -330,12 +410,14 @@ export const PackagesView: React.FC<PackagesViewProps> = ({ user, onOrderPlaced,
               </span>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
               {[
                 { count: 1, labelEn: '1 Hen', labelUr: '1 مرغی', price: calculatePackagePrice(1) },
                 { count: 3, labelEn: '3 Hens', labelUr: '3 مرغیاں', price: calculatePackagePrice(3) },
                 { count: 5, labelEn: '5 Hens', labelUr: '5 مرغیاں', price: calculatePackagePrice(5) },
                 { count: 10, labelEn: '10 Hens', labelUr: '10 مرغیاں', price: calculatePackagePrice(10) },
+                { count: 25, labelEn: '25 Hens', labelUr: '25 مرغیاں', price: calculatePackagePrice(25) },
+                { count: 100, labelEn: '100 Hens', labelUr: '100 مرغیاں', price: calculatePackagePrice(100) },
               ].map((item) => {
                 const isActive = quantity === item.count;
                 return (
@@ -446,7 +528,13 @@ export const PackagesView: React.FC<PackagesViewProps> = ({ user, onOrderPlaced,
                   <span>{activeMethod?.title || 'Payment Verification'}</span>
                 </div>
               <h3 className="text-xl sm:text-2xl font-black text-[#d4af37] font-serif">
-                {activeMethod?.title ? `Payment via ${activeMethod.title}` : strings.orderModalTitle}
+                {activeMethod?.title
+                  ? isUr
+                    ? `${activeMethod.titleUr || activeMethod.title} کے ذریعے ادائیگی`
+                    : `Payment via ${activeMethod.title}`
+                  : isUr
+                  ? 'پیکج ادائیگی کی تصدیق'
+                  : 'Package Payment Verification'}
               </h3>
               <p className="text-xs text-[#f4efe6]/80 mt-0.5">
                 {quantity} {quantity === 1 ? 'Hen' : 'Hens'} — Total: <span className="font-bold text-[#f3df88]">PKR {calculatedTotal.toLocaleString()}</span>
@@ -633,15 +721,24 @@ export const PackagesView: React.FC<PackagesViewProps> = ({ user, onOrderPlaced,
                 )}
               </div>
 
-              {!proofSlipBase64 ? (
+              {isCompressingSlip ? (
+                <div className="flex flex-col items-center justify-center gap-2 p-5 rounded-xl border border-[#d4af37]/40 bg-[#0a2618]/80">
+                  <div className="h-6 w-6 animate-spin rounded-full border-2 border-[#d4af37] border-t-transparent" />
+                  <span className="text-xs font-bold text-[#f3df88]">
+                    {isUr ? 'رسید کی تصویر کو بہتر اور کمپریس کیا جا رہا ہے...' : 'Optimizing & compressing payment slip for instant delivery...'}
+                  </span>
+                </div>
+              ) : !proofSlipBase64 ? (
                 <div>
                   <label className="flex flex-col items-center justify-center gap-2 p-5 rounded-xl border border-[#d4af37]/30 bg-[#0a2618]/60 hover:bg-[#0a2618] cursor-pointer transition-all">
                     <ImageIcon className="h-8 w-8 text-[#d4af37]" />
                     <span className="text-xs font-semibold text-[#f4efe6]">
                       {isUr ? 'رسید کی تصویر منتخب کریں (PNG, JPG, WebP)' : 'Click to browse & select Payment Slip image'}
                     </span>
-                    <span className="text-[10px] text-[#f4efe6]/50">
-                      {isUr ? 'زیادہ سے زیادہ سائز: 8MB' : 'Max size: 8MB'}
+                    <span className="text-[10px] text-[#f4efe6]/55">
+                      {isUr
+                        ? 'زیادہ سے زیادہ 15MB (تیز اپ لوڈ کے لیے خودکار کمپریشن)'
+                        : 'Up to 15MB supported (auto-compressed for reliable Admin delivery)'}
                     </span>
                     <input
                       type="file"
@@ -668,7 +765,13 @@ export const PackagesView: React.FC<PackagesViewProps> = ({ user, onOrderPlaced,
                         <ZoomIn className="h-3.5 w-3.5 text-[#d4af37]" />
                       </p>
                       <p className="text-[10px] text-emerald-400">
-                        {isUr ? 'ایڈمن تصدیق کے لیے تیار' : 'Ready for admin review'}
+                        {proofSlipMeta
+                          ? isUr
+                            ? `کمپریسڈ: ${formatSlipSize(proofSlipMeta.originalBytes)} → ${formatSlipSize(proofSlipMeta.compressedBytes)} • ایڈمن تصدیق کے لیے تیار`
+                            : `Optimized: ${formatSlipSize(proofSlipMeta.originalBytes)} → ${formatSlipSize(proofSlipMeta.compressedBytes)} • Ready for admin review`
+                          : isUr
+                          ? 'ایڈمن تصدیق کے لیے تیار'
+                          : 'Ready for admin review'}
                       </p>
                     </div>
                   </div>
@@ -730,9 +833,9 @@ export const PackagesView: React.FC<PackagesViewProps> = ({ user, onOrderPlaced,
 
             <button
               type="submit"
-              disabled={isSubmitting || paymentMethods.length === 0 || !activeMethod}
+              disabled={isSubmitting || isCompressingSlip || paymentMethods.length === 0 || !activeMethod}
               className={`w-full flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-[#d4af37] via-[#f3df88] to-[#d4af37] py-3.5 text-sm font-black text-[#051a10] shadow-xl shadow-[#d4af37]/30 transition-all ${
-                isSubmitting || paymentMethods.length === 0 || !activeMethod
+                isSubmitting || isCompressingSlip || paymentMethods.length === 0 || !activeMethod
                   ? 'opacity-50 cursor-not-allowed scale-98'
                   : 'hover:brightness-105 active:scale-98 cursor-pointer'
               }`}
@@ -740,7 +843,15 @@ export const PackagesView: React.FC<PackagesViewProps> = ({ user, onOrderPlaced,
               {isSubmitting ? (
                 <>
                   <div className="h-4 w-4 animate-spin rounded-full border-2 border-[#051a10] border-t-transparent" />
-                  <span>{isUr ? 'آرڈر تصدیق جاری ہے...' : 'Verifying & Submitting Order...'}</span>
+                  <span>
+                    {submitStage === 'uploading_slip'
+                      ? isUr
+                        ? 'ادائیگی کی رسید اپ لوڈ ہو رہی ہے...'
+                        : 'Uploading Payment Slip...'
+                      : isUr
+                      ? 'آرڈر محفوظ کیا جا رہا ہے...'
+                      : 'Saving Order to Admin Panel...'}
+                  </span>
                 </>
               ) : (
                 <>
@@ -905,9 +1016,20 @@ export const PackagesView: React.FC<PackagesViewProps> = ({ user, onOrderPlaced,
               {isUr ? 'آپ کے جمع شدہ پارٹنرشپ آرڈرز' : 'Your Submitted Package Orders'}
             </h3>
           </div>
-          <span className="rounded-full bg-[#051a10] border border-[#d4af37]/30 px-3 py-1 text-xs font-bold text-[#f3df88]">
-            {userOrders.length} {isUr ? 'آرڈرز' : 'Orders'}
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="rounded-full bg-[#051a10] border border-[#d4af37]/30 px-3 py-1 text-xs font-bold text-[#f3df88]">
+              {userOrders.length} {isUr ? 'آرڈرز' : 'Orders'}
+            </span>
+            <button
+              type="button"
+              onClick={() => loadPackageViewData(true)}
+              disabled={isRefreshingOrders}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-[#d4af37]/40 bg-[#051a10] px-3 py-1.5 text-xs font-bold text-[#f3df88] hover:border-[#d4af37] cursor-pointer disabled:opacity-50"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 text-[#d4af37] ${isRefreshingOrders ? 'animate-spin' : ''}`} />
+              <span>{isUr ? 'ریفریش' : 'Refresh'}</span>
+            </button>
+          </div>
         </div>
 
         {userOrders.length > 0 ? (

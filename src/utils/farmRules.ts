@@ -1748,4 +1748,190 @@ export function validateMediaUploadFile(
   return { valid: true };
 }
 
+// ---------------- PART 1: ORDER SUBMISSION VALIDATION & INCREMENTAL APPROVAL ----------------
+
+export const MAX_ORDER_SLIP_UPLOAD_BYTES = 15 * 1024 * 1024; // Accept up to 15MB raw phone screenshots before client compression
+export const MAX_FIRESTORE_SLIP_DATAURL_BYTES = 380 * 1024; // ~380KB max inline fallback (well below Firestore's 1MB doc limit)
+export const MAX_ORDER_DOC_BYTES = 900 * 1024; // Hard safety ceiling for serialized Firestore order documents
+
+export function normalizeTransactionId(tid: string): string {
+  return (tid || '').trim().toLowerCase();
+}
+
+export function estimateUtf8ByteLength(value: string): number {
+  if (!value) return 0;
+  if (typeof TextEncoder !== 'undefined') {
+    return new TextEncoder().encode(value).length;
+  }
+  return value.length * 2;
+}
+
+/**
+ * Recursively strips `undefined` values from an object before writing to Firestore
+ * so `setDoc` / `updateDoc` never throws `Unsupported field value: undefined`.
+ */
+export function sanitizeFirestorePayload<T extends Record<string, any>>(payload: T): Record<string, any> {
+  const clean: Record<string, any> = {};
+  for (const [key, val] of Object.entries(payload)) {
+    if (val === undefined) continue;
+    if (Array.isArray(val)) {
+      clean[key] = val.map((item) =>
+        item && typeof item === 'object' && !Array.isArray(item)
+          ? sanitizeFirestorePayload(item)
+          : item
+      );
+    } else if (val !== null && typeof val === 'object' && !(val instanceof Date)) {
+      clean[key] = sanitizeFirestorePayload(val);
+    } else {
+      clean[key] = val;
+    }
+  }
+  return clean;
+}
+
+export interface OrderValidationInput {
+  hensCount: number;
+  amount: number;
+  tid: string;
+  proofSlipUrl?: string;
+}
+
+export interface OrderValidationResult {
+  valid: boolean;
+  error?: string;
+  errorUr?: string;
+  normalizedTid: string;
+  expectedAmount: number;
+  proofSlipBytes: number;
+}
+
+/**
+ * Validates package order payloads for ALL package sizes (1 hen, 5 hens / Rs. 4,000,
+ * 10 hens / Rs. 8,000, 50 hens, 100+ hens, etc.) and enforces safe Firestore payload bounds.
+ */
+export function validateOrderSubmissionPayload(input: OrderValidationInput): OrderValidationResult {
+  const hensCount = Math.floor(Number(input.hensCount) || 0);
+  const amount = Math.round(Number(input.amount) || 0);
+  const cleanTid = (input.tid || '').trim();
+  const normalizedTid = normalizeTransactionId(cleanTid);
+  const expectedAmount = hensCount >= 1 ? calculatePackagePrice(hensCount) : 0;
+  const proofSlip = (input.proofSlipUrl || '').trim();
+  const proofSlipBytes = estimateUtf8ByteLength(proofSlip);
+
+  if (hensCount < 1 || !Number.isFinite(hensCount)) {
+    return {
+      valid: false,
+      error: 'Please select at least 1 hen to place a package order.',
+      errorUr: 'آرڈر جمع کروانے کے لیے کم از کم 1 مرغی منتخب کریں۔',
+      normalizedTid,
+      expectedAmount,
+      proofSlipBytes,
+    };
+  }
+
+  if (amount <= 0 || amount !== expectedAmount) {
+    return {
+      valid: false,
+      error: `Package amount mismatch: ${hensCount} ${hensCount === 1 ? 'hen' : 'hens'} requires PKR ${expectedAmount.toLocaleString()}.`,
+      errorUr: `پیکج کی رقم درست نہیں ہے: ${hensCount} مرغیوں کی قیمت ${expectedAmount.toLocaleString()} روپے ہونی چاہیے۔`,
+      normalizedTid,
+      expectedAmount,
+      proofSlipBytes,
+    };
+  }
+
+  if (cleanTid.length < 3) {
+    return {
+      valid: false,
+      error: 'Please enter a valid Transaction ID (TxID) with at least 3 characters.',
+      errorUr: 'براہ کرم کم از کم 3 حروف یا ہندسوں پر مشتمل درست ٹرانزیکشن آئی ڈی (TID) درج کریں۔',
+      normalizedTid,
+      expectedAmount,
+      proofSlipBytes,
+    };
+  }
+
+  if (!proofSlip) {
+    return {
+      valid: false,
+      error: 'Mandatory: Please upload your payment slip / screenshot before submitting.',
+      errorUr: 'لازمی: براہ کرم ادائیگی کی رسید / اسکرین شاٹ اپ لوڈ کریں۔',
+      normalizedTid,
+      expectedAmount,
+      proofSlipBytes,
+    };
+  }
+
+  // If storing an inline data URL fallback, enforce strict byte ceiling well under Firestore's 1MB limit
+  if (proofSlip.startsWith('data:') && proofSlipBytes > MAX_FIRESTORE_SLIP_DATAURL_BYTES) {
+    const kb = Math.round(proofSlipBytes / 1024);
+    return {
+      valid: false,
+      error: `Compressed payment slip (${kb} KB) is still too large for database storage. Please upload a clearer or cropped screenshot.`,
+      errorUr: `ادائیگی کی رسید کا سائز (${kb} KB) اب بھی زیادہ ہے۔ براہ کرم اسکرین شاٹ کو تھوڑا کراپ کر کے دوبارہ اپ لوڈ کریں۔`,
+      normalizedTid,
+      expectedAmount,
+      proofSlipBytes,
+    };
+  }
+
+  return {
+    valid: true,
+    normalizedTid,
+    expectedAmount,
+    proofSlipBytes,
+  };
+}
+
+/**
+ * Computes incremental updates for ONLY the assigned shed and the global farm stats summary
+ * when an admin approves an order, without needing to scan the entire `users` collection.
+ */
+export function computeIncrementalShedAndGlobalStats(
+  currentSheds: FarmShed[],
+  assignedShedId: string,
+  addedHens: number,
+  nowIso: string = new Date().toISOString()
+): { updatedShed: FarmShed; updatedSheds: FarmShed[]; updatedGlobalStats: GlobalFarmStats } {
+  const safeAdded = Math.max(0, Math.floor(addedHens || 0));
+  const merged = mergeAllSheds(currentSheds);
+
+  let updatedShed: FarmShed | null = null;
+  const updatedSheds = merged.map((shed) => {
+    if (shed.id !== assignedShedId) return shed;
+
+    const prevHens = Math.max(0, Number(shed.totalHens) || 0);
+    const nextHens = prevHens + safeAdded;
+    const prevDailyEggs =
+      typeof shed.dailyEggCollection === 'number' && !Number.isNaN(shed.dailyEggCollection)
+        ? shed.dailyEggCollection
+        : prevHens;
+    const nextDailyEggs = prevDailyEggs + safeAdded;
+    const cracked = getShedCrackedEggsCount({ ...shed, totalHens: nextHens });
+    const nextNetFresh = Math.max(0, nextDailyEggs - cracked);
+
+    updatedShed = {
+      ...shed,
+      totalHens: nextHens,
+      dailyEggCollection: nextDailyEggs,
+      crackedEggsCount: cracked,
+      netFreshEggs: nextNetFresh,
+      lastUpdated: nowIso,
+    };
+    return updatedShed;
+  });
+
+  const resolvedShed = updatedShed || updatedSheds[0];
+  const updatedGlobalStats = {
+    ...aggregateGlobalStatsFromSheds(updatedSheds),
+    lastUpdated: nowIso,
+  };
+
+  return {
+    updatedShed: resolvedShed,
+    updatedSheds,
+    updatedGlobalStats,
+  };
+}
+
 

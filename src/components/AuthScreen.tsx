@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { UserAccount } from '../types/farm';
 import { OFFICIAL_INFO, generateReferralCode } from '../utils/farmRules';
 import { setCurrentUser } from '../services/storage';
-import { apiLogin, apiRegister, apiResetPassword } from '../services/api';
+import { apiLogin, apiRegister, apiResetPassword, classifyFirestoreError } from '../services/api';
 import { TrustBadge } from './TrustBadge';
 import { t, TERMS_MODAL_ITEMS } from '../utils/translations';
 import { Lock, Mail, User, Phone, Gift, Languages, ArrowRight, CheckCircle2, AlertCircle, KeyRound, ArrowLeft, FileText, ShieldCheck, X } from 'lucide-react';
@@ -84,7 +84,12 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSuccess, lang, onToggl
       setCurrentUser(user);
       onSuccess(user);
     } catch (err: any) {
-      setErrorMsg(isUr ? 'لاگ ان ناکام رہا۔ براہ کرم ای میل اور پاس ورڈ چیک کریں۔' : err.message || 'Incorrect email or password.');
+      const classified = classifyFirestoreError(err, lang);
+      if (classified.isAuthError) {
+        setErrorMsg(isUr ? classified.messageUr : classified.messageEn);
+      } else {
+        setErrorMsg(isUr ? classified.messageUr : classified.messageEn);
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -132,7 +137,8 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSuccess, lang, onToggl
         onSuccess(user);
       }, 500);
     } catch (err: any) {
-      setErrorMsg(isUr ? 'اکاؤنٹ بنانے میں خرابی: ' + (err.message || '') : err.message || 'Error creating account');
+      const classified = classifyFirestoreError(err, lang);
+      setErrorMsg(isUr ? classified.messageUr : classified.messageEn);
     } finally {
       setIsSubmitting(false);
     }
@@ -177,7 +183,8 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSuccess, lang, onToggl
         onSuccess(user);
       }, 700);
     } catch (err: any) {
-      setErrorMsg(isUr ? 'خرابی: ' + (err.message || '') : err.message || 'Password reset failed');
+      const classified = classifyFirestoreError(err, lang);
+      setErrorMsg(isUr ? classified.messageUr : classified.messageEn);
     } finally {
       setSubmittingReset(false);
     }
@@ -553,7 +560,15 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSuccess, lang, onToggl
                 {isSubmitting ? (
                   <>
                     <div className="h-4 w-4 animate-spin rounded-full border-2 border-[#051a10] border-t-transparent" />
-                    <span>{isUr ? 'اکاؤنٹ بن رہا ہے...' : 'Creating Account...'}</span>
+                    <span>
+                      {mode === 'signin'
+                        ? isUr
+                          ? 'لاگ ان ہو رہا ہے...'
+                          : 'Signing In...'
+                        : isUr
+                        ? 'اکاؤنٹ بن رہا ہے...'
+                        : 'Creating Account...'}
+                    </span>
                   </>
                 ) : (
                   <>

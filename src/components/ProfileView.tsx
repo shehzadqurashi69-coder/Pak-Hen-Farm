@@ -56,12 +56,10 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ user, lang, onNavigate
     setTimeout(() => setCopied(false), 2500);
   };
 
-  const handleShareWhatsApp = () => {
-    const text = isUr
-      ? `پاک ہین فارم میں شامل ہوں اور پورے پاکستان میں حقیقی پولٹری فارمنگ سے روزانہ انڈے وصول کریں۔ میرا ریفرل کوڈ استعمال کریں: ${referralUrl}`
-      : `Join Pak Hen Farm (Real physical poultry farming across Pakistan) and collect daily eggs! Use my link: ${referralUrl}`;
-    window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank');
-  };
+  const whatsappShareText = isUr
+    ? `پاک ہین فارم میں شامل ہوں اور پورے پاکستان میں حقیقی پولٹری فارمنگ سے روزانہ انڈے وصول کریں۔ میرا ریفرل کوڈ استعمال کریں: ${referralUrl}`
+    : `Join Pak Hen Farm (Real physical poultry farming across Pakistan) and collect daily eggs! Use my link: ${referralUrl}`;
+  const whatsappShareUrl = `https://wa.me/?text=${encodeURIComponent(whatsappShareText)}`;
 
   const handleSaveAccountSettings = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -355,13 +353,15 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ user, lang, onNavigate
             <span>{copied ? strings.linkCopied : strings.copyLink}</span>
           </button>
 
-          <button
-            onClick={handleShareWhatsApp}
+          <a
+            href={whatsappShareUrl}
+            target="_blank"
+            rel="noopener noreferrer"
             className="flex items-center justify-center gap-1.5 rounded-xl bg-[#25D366] px-4 py-2.5 text-xs font-bold text-white hover:bg-[#20ba5a] transition-all cursor-pointer shadow-md shrink-0 active:scale-95"
           >
             <Share2 className="h-4 w-4" />
             <span>{strings.shareWhatsApp}</span>
-          </button>
+          </a>
         </div>
       </div>
 

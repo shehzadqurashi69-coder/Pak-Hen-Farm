@@ -11,9 +11,9 @@ import {
 } from '../utils/farmRules';
 import {
   apiCreateWithdrawal,
-  subscribeToWithdrawals,
+  apiGetUserWithdrawals,
   apiGetUserById,
-  subscribeToUserDoc,
+  getFriendlyErrorMessage,
 } from '../services/api';
 import { PaymentLogo } from './PaymentLogos';
 import { t } from '../utils/translations';
@@ -25,6 +25,7 @@ import {
   AlertCircle,
   ShieldAlert,
   Loader2,
+  RefreshCw,
 } from 'lucide-react';
 
 interface WithdrawViewProps {
@@ -58,6 +59,7 @@ export const WithdrawView: React.FC<WithdrawViewProps> = ({
   const [successMsg, setSuccessMsg] = useState('');
   const [userWithdrawals, setUserWithdrawals] = useState<WithdrawalRequest[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
   // Dynamic labels and placeholders for payout gateways
   const getGatewayConfig = (gw: string) => {
@@ -111,31 +113,34 @@ export const WithdrawView: React.FC<WithdrawViewProps> = ({
   const parsedAmount = parseFloat(amountStr) || 0;
   const eggsEquiv = Math.floor(parsedAmount / EGG_PRICE_PKR);
 
+  // Keep balance synced with App.tsx's single authoritative user listener (0 extra listeners)
   useEffect(() => {
-    // 1. Live subscription to authoritative user document in Firestore to prevent false "Insufficient Balance" bug
-    let isMounted = true;
-    apiGetUserById(user.id).then((fresh) => {
-      if (isMounted && fresh) {
-        setLiveBalance(Number(fresh.walletBalance) || 0);
+    setLiveBalance(Number(user.walletBalance) || 0);
+  }, [user.walletBalance]);
+
+  const loadWithdrawals = async (forceRefresh: boolean = false) => {
+    if (forceRefresh && isRefreshing) return;
+    if (forceRefresh) setIsRefreshing(true);
+    try {
+      const [wRes, uRes] = await Promise.allSettled([
+        apiGetUserWithdrawals(user.id, forceRefresh),
+        forceRefresh ? apiGetUserById(user.id, true) : Promise.resolve(null),
+      ]);
+      if (wRes.status === 'fulfilled') {
+        setUserWithdrawals(wRes.value);
+      } else if (forceRefresh) {
+        setErrorMsg(getFriendlyErrorMessage(wRes.reason, lang));
       }
-    });
-
-    const unsubUser = subscribeToUserDoc(user.id, (fresh) => {
-      if (fresh) {
-        setLiveBalance(Number(fresh.walletBalance) || 0);
+      if (uRes.status === 'fulfilled' && uRes.value) {
+        setLiveBalance(Number(uRes.value.walletBalance) || 0);
       }
-    });
+    } finally {
+      if (forceRefresh) setIsRefreshing(false);
+    }
+  };
 
-    // 2. Live subscription to user withdrawals from Firebase
-    const unsubWithdrawals = subscribeToWithdrawals('user', user.id, (list) => {
-      setUserWithdrawals(list);
-    });
-
-    return () => {
-      isMounted = false;
-      unsubUser();
-      unsubWithdrawals();
-    };
+  useEffect(() => {
+    loadWithdrawals(false);
   }, [user.id]);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -154,9 +159,8 @@ export const WithdrawView: React.FC<WithdrawViewProps> = ({
     try {
       setIsSubmitting(true);
 
-      // Dynamically fetch authoritative user document directly from Firestore before validation
-      const freshUser = await apiGetUserById(user.id);
-      const currentAuthoritativeBalance = freshUser ? Number(freshUser.walletBalance) : liveBalance;
+      // Client-side pre-check using live synced balance; server-side runTransaction verifies authoritatively
+      const currentAuthoritativeBalance = liveBalance;
 
       const validation = validateWithdrawal(parsedAmount, currentAuthoritativeBalance);
       if (!validation.isValid) {
@@ -181,13 +185,14 @@ export const WithdrawView: React.FC<WithdrawViewProps> = ({
         return;
       }
 
-      const res = await apiCreateWithdrawal(freshUser || user, {
+      const res = await apiCreateWithdrawal(user, {
         amount: parsedAmount,
         easypaisaNumber: cleanNum,
         easypaisaTitle: `${cleanTitle} (${currentGwConfig.name}${bankName ? ` - ${bankName.trim()}` : ''})`,
       });
 
       setLiveBalance(res.updatedUser.walletBalance);
+      setUserWithdrawals((prev) => [res.withdrawal, ...prev.filter((w) => w.id !== res.withdrawal.id)]);
       setSuccessMsg(strings.withdrawSubmittedSuccess);
       onWithdrawalRequested(res.withdrawal, res.updatedUser);
       setAmountStr('');
@@ -196,7 +201,7 @@ export const WithdrawView: React.FC<WithdrawViewProps> = ({
         setSuccessMsg('');
       }, 5000);
     } catch (err: any) {
-      setErrorMsg(err.message || 'Error submitting withdrawal');
+      setErrorMsg(getFriendlyErrorMessage(err, lang));
     } finally {
       setIsSubmitting(false);
     }
@@ -448,11 +453,22 @@ export const WithdrawView: React.FC<WithdrawViewProps> = ({
 
       {/* User Withdrawal Requests History */}
       <div className="rounded-3xl border border-[#d4af37]/25 bg-[#0a2618]/80 p-5 sm:p-6 shadow-xl">
-        <div className="flex items-center gap-2 mb-4">
-          <Clock className="h-4 w-4 text-[#d4af37]" />
-          <h3 className="text-base font-bold text-[#f4efe6]">
-            {strings.withdrawalHistoryTitle}
-          </h3>
+        <div className="flex items-center justify-between gap-2 mb-4">
+          <div className="flex items-center gap-2">
+            <Clock className="h-4 w-4 text-[#d4af37]" />
+            <h3 className="text-base font-bold text-[#f4efe6]">
+              {strings.withdrawalHistoryTitle}
+            </h3>
+          </div>
+          <button
+            type="button"
+            onClick={() => loadWithdrawals(true)}
+            disabled={isRefreshing}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-[#d4af37]/40 bg-[#051a10] px-3 py-1.5 text-xs font-bold text-[#f3df88] hover:border-[#d4af37] cursor-pointer disabled:opacity-50"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 text-[#d4af37] ${isRefreshing ? 'animate-spin' : ''}`} />
+            <span>{isUr ? 'ریفریش' : 'Refresh'}</span>
+          </button>
         </div>
 
         {userWithdrawals.length === 0 ? (

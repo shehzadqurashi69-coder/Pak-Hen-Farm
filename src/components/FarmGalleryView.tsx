@@ -66,6 +66,7 @@ export const FarmGalleryView: React.FC<FarmGalleryViewProps> = ({
 
   // Active playing video modal
   const [playingVideo, setPlayingVideo] = useState<FarmGalleryItem | null>(null);
+  const [shareNotice, setShareNotice] = useState<string | null>(null);
 
   // Local likes tracking
   const [likedIds, setLikedIds] = useState<Set<string>>(() => {
@@ -123,7 +124,8 @@ export const FarmGalleryView: React.FC<FarmGalleryViewProps> = ({
       }
     } else {
       navigator.clipboard?.writeText(window.location.href);
-      alert(isUr ? 'گیلری کا لنک کاپی کر لیا گیا!' : 'Farm gallery link copied to clipboard!');
+      setShareNotice(isUr ? 'گیلری کا لنک کاپی کر لیا گیا!' : 'Farm gallery link copied to clipboard!');
+      setTimeout(() => setShareNotice(null), 3000);
     }
   };
 
@@ -202,6 +204,21 @@ export const FarmGalleryView: React.FC<FarmGalleryViewProps> = ({
 
   return (
     <div className="space-y-6 pb-12">
+      {shareNotice && (
+        <div className="flex items-center justify-between gap-2 rounded-2xl border border-emerald-500/40 bg-emerald-950/90 px-4 py-2.5 text-xs font-bold text-emerald-200 shadow-lg">
+          <span className="flex items-center gap-2">
+            <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
+            <span>{shareNotice}</span>
+          </span>
+          <button
+            type="button"
+            onClick={() => setShareNotice(null)}
+            className="text-emerald-300 hover:text-white cursor-pointer"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      )}
       {/* Top Breadcrumb & Back Navigation */}
       <div className="flex items-center justify-between gap-3">
         <button

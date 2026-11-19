@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { UserAccount } from '../types/farm';
 import { t } from '../utils/translations';
-import { subscribeToMyReferrals } from '../services/firebase';
+import { apiGetMyReferrals, getFriendlyErrorMessage } from '../services/api';
 import {
   evaluateReferralMilestones,
   getReferralCommissionRateForPackage,
@@ -18,6 +18,7 @@ import {
   CheckCircle2,
   Clock,
   UserCheck,
+  RefreshCw,
 } from 'lucide-react';
 
 interface InviteViewProps {
@@ -33,28 +34,39 @@ export const InviteView: React.FC<InviteViewProps> = ({ user, lang, onUserUpdate
   const [copied, setCopied] = useState(false);
   const [referrals, setReferrals] = useState<UserAccount[]>([]);
   const [loading, setLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const referralUrl = `${window.location.origin}/?ref=${user.referralCode}`;
+  const whatsappShareUrl = `https://wa.me/?text=${encodeURIComponent(
+    isUr
+      ? `السلام علیکم! پاک ہین فارم میں شامل ہوں اور حقیقی فزیکل مرغیوں کے ذریعے روزانہ انڈے وصول کریں۔ اس لنک سے اکاؤنٹ بنائیں: ${referralUrl}`
+      : `Join Pak Hen Farm (Real physical poultry farming across Pakistan) and collect fresh daily eggs directly to your wallet! Sign up with my link: ${referralUrl}`
+  )}`;
+
+  const loadReferrals = async (forceRefresh: boolean = false) => {
+    if (forceRefresh && isRefreshing) return;
+    setErrorMsg(null);
+    if (forceRefresh) setIsRefreshing(true);
+    try {
+      const list = await apiGetMyReferrals(user.referralCode, forceRefresh);
+      setReferrals(list);
+    } catch (err: any) {
+      setErrorMsg(getFriendlyErrorMessage(err, lang));
+    } finally {
+      setLoading(false);
+      if (forceRefresh) setIsRefreshing(false);
+    }
+  };
 
   useEffect(() => {
-    const unsub = subscribeToMyReferrals(user.referralCode, (list) => {
-      setReferrals(list);
-      setLoading(false);
-    });
-    return () => unsub();
+    loadReferrals(false);
   }, [user.referralCode]);
 
   const handleCopy = () => {
     navigator.clipboard.writeText(referralUrl);
     setCopied(true);
     setTimeout(() => setCopied(false), 2500);
-  };
-
-  const handleShareWhatsApp = () => {
-    const message = isUr
-      ? `السلام علیکم! پاک ہین فارم میں شامل ہوں اور حقیقی فزیکل مرغیوں کے ذریعے روزانہ انڈے وصول کریں۔ اس لنک سے اکاؤنٹ بنائیں: ${referralUrl}`
-      : `Join Pak Hen Farm (Real physical poultry farming across Pakistan) and collect fresh daily eggs directly to your wallet! Sign up with my link: ${referralUrl}`;
-    window.open(`https://wa.me/?text=${encodeURIComponent(message)}`, '_blank');
   };
 
   const milestoneEval = evaluateReferralMilestones(referrals, user.claimedMilestoneTargets || []);
@@ -137,14 +149,15 @@ export const InviteView: React.FC<InviteViewProps> = ({ user, lang, onUserUpdate
               {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
               <span>{copied ? strings.linkCopied : strings.copyLink}</span>
             </button>
-            <button
-              type="button"
-              onClick={handleShareWhatsApp}
+            <a
+              href={whatsappShareUrl}
+              target="_blank"
+              rel="noopener noreferrer"
               className="flex items-center justify-center gap-2 rounded-xl bg-[#25D366] px-5 py-3 text-xs font-black text-white hover:bg-[#20ba5a] active:scale-98 transition-all cursor-pointer shadow-lg shadow-emerald-900/30 shrink-0"
             >
               <Share2 className="h-4 w-4" />
               <span>{strings.shareWhatsApp}</span>
-            </button>
+            </a>
           </div>
         </div>
       </div>
@@ -191,10 +204,27 @@ export const InviteView: React.FC<InviteViewProps> = ({ user, lang, onUserUpdate
             </div>
           </div>
 
-          <span className="rounded-full bg-[#051a10] border border-[#d4af37]/40 px-3 py-1 text-xs font-mono font-bold text-[#f3df88]">
-            {referrals.length} {isUr ? 'اراکین' : 'Members'}
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="rounded-full bg-[#051a10] border border-[#d4af37]/40 px-3 py-1 text-xs font-mono font-bold text-[#f3df88]">
+              {referrals.length} {isUr ? 'اراکین' : 'Members'}
+            </span>
+            <button
+              type="button"
+              onClick={() => loadReferrals(true)}
+              disabled={isRefreshing}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-[#d4af37]/40 bg-[#051a10] px-3 py-1.5 text-xs font-bold text-[#f3df88] hover:border-[#d4af37] cursor-pointer disabled:opacity-50"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 text-[#d4af37] ${isRefreshing ? 'animate-spin' : ''}`} />
+              <span>{isUr ? 'ریفریش' : 'Refresh'}</span>
+            </button>
+          </div>
         </div>
+
+        {errorMsg && (
+          <div className="rounded-xl border border-amber-500/40 bg-amber-950/60 p-3 text-xs text-amber-200">
+            {errorMsg}
+          </div>
+        )}
 
         {loading ? (
           <div className="py-8 text-center text-xs text-[#f4efe6]/60 animate-pulse">

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { UserAccount, SupportTicket } from '../types/farm';
 import { OFFICIAL_INFO } from '../utils/farmRules';
-import { apiCreateTicket, subscribeToTickets } from '../services/api';
+import { apiCreateTicket, apiGetUserTickets, getFriendlyErrorMessage } from '../services/api';
 import { t } from '../utils/translations';
 import {
   MessageSquare,
@@ -11,6 +11,7 @@ import {
   Headphones,
   Check,
   ExternalLink,
+  RefreshCw,
 } from 'lucide-react';
 
 interface HelpViewProps {
@@ -45,12 +46,23 @@ export const HelpView: React.FC<HelpViewProps> = ({ user, lang }) => {
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   const [tickets, setTickets] = useState<SupportTicket[]>([]);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const loadTickets = async (forceRefresh: boolean = false) => {
+    if (forceRefresh && isRefreshing) return;
+    if (forceRefresh) setIsRefreshing(true);
+    try {
+      const list = await apiGetUserTickets(user.id, forceRefresh);
+      setTickets(list);
+    } catch (err: any) {
+      if (forceRefresh) setErrorMsg(getFriendlyErrorMessage(err, lang));
+    } finally {
+      if (forceRefresh) setIsRefreshing(false);
+    }
+  };
 
   useEffect(() => {
-    const unsub = subscribeToTickets('user', user.id, (list) => {
-      setTickets(list);
-    });
-    return () => unsub();
+    loadTickets(false);
   }, [user.id]);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -67,7 +79,8 @@ export const HelpView: React.FC<HelpViewProps> = ({ user, lang }) => {
     }
 
     try {
-      await apiCreateTicket(user, cleanSubject, cleanMsg);
+      const created = await apiCreateTicket(user, cleanSubject, cleanMsg);
+      setTickets((prev) => [created, ...prev.filter((item) => item.id !== created.id)]);
       setSuccessMsg(strings.ticketSubmittedSuccess);
       setSubject('');
       setMessage('');
@@ -76,7 +89,7 @@ export const HelpView: React.FC<HelpViewProps> = ({ user, lang }) => {
         setSuccessMsg('');
       }, 4000);
     } catch (err: any) {
-      setErrorMsg(err.message || 'Error submitting ticket');
+      setErrorMsg(getFriendlyErrorMessage(err, lang));
     }
   };
 
@@ -290,9 +303,20 @@ export const HelpView: React.FC<HelpViewProps> = ({ user, lang }) => {
 
       {/* User's Ticket Inquiries & Staff Replies */}
       <div className="rounded-3xl border border-[#d4af37]/25 bg-[#0a2618]/80 p-5 sm:p-6 shadow-xl">
-        <h3 className="text-base font-bold text-[#f4efe6] mb-4">
-          {strings.yourTicketsTitle}
-        </h3>
+        <div className="flex items-center justify-between gap-2 mb-4">
+          <h3 className="text-base font-bold text-[#f4efe6]">
+            {strings.yourTicketsTitle}
+          </h3>
+          <button
+            type="button"
+            onClick={() => loadTickets(true)}
+            disabled={isRefreshing}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-[#d4af37]/40 bg-[#051a10] px-3 py-1.5 text-xs font-bold text-[#f3df88] hover:border-[#d4af37] cursor-pointer disabled:opacity-50"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 text-[#d4af37] ${isRefreshing ? 'animate-spin' : ''}`} />
+            <span>{isUr ? 'ریفریش' : 'Refresh'}</span>
+          </button>
+        </div>
 
         {tickets.length === 0 ? (
           <p className="text-xs text-[#f4efe6]/50 text-center py-4">

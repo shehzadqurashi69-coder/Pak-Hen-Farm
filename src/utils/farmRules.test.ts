@@ -43,6 +43,11 @@ import {
   getUserActiveHensByShed,
   calculateMultiShedCollectionYield,
   aggregateGlobalStatsFromSheds,
+  validateOrderSubmissionPayload,
+  sanitizeFirestorePayload,
+  normalizeTransactionId,
+  computeIncrementalShedAndGlobalStats,
+  MAX_FIRESTORE_SLIP_DATAURL_BYTES,
 } from './farmRules';
 import { PurchasedPackage, FarmShed, UserAccount, PaymentAccount } from '../types/farm';
 
@@ -1133,6 +1138,142 @@ test('Part 2 Global Farm Production Stats: aggregates all 5 sheds (Shed-101 to S
   assert.equal(agg.cracked, 125); // 50+20+30+15+10
   assert.equal(agg.netFresh, 24755); // 24880 - 125
   assert.equal(agg.totalMortality, 10); // 4+1+2+0+3
+});
+
+test('Part 1 Order Submission: accepts ALL package sizes (1 hen, Rs. 4,000, Rs. 8,000, 100 hens) with lightweight slip URL', () => {
+  const cases = [
+    { hensCount: 1, amount: 1000, tid: 'TRX-1000-A' },
+    { hensCount: 3, amount: 2700, tid: 'TRX-2700-B' },
+    { hensCount: 5, amount: 4000, tid: 'TRX-4000-C' },
+    { hensCount: 10, amount: 8000, tid: 'TRX-8000-D' },
+    { hensCount: 25, amount: 20000, tid: 'TRX-20000-E' },
+    { hensCount: 100, amount: 80000, tid: 'TRX-80000-F' },
+  ];
+
+  for (const c of cases) {
+    assert.equal(calculatePackagePrice(c.hensCount), c.amount);
+    const res = validateOrderSubmissionPayload({
+      hensCount: c.hensCount,
+      amount: c.amount,
+      tid: `  ${c.tid}  `,
+      proofSlipUrl: '/uploads/slips/1760000000_receipt.jpg',
+    });
+    assert.equal(res.valid, true, `Expected ${c.hensCount} hens (Rs. ${c.amount}) to pass`);
+    assert.equal(res.normalizedTid, normalizeTransactionId(c.tid));
+    assert.equal(res.expectedAmount, c.amount);
+  }
+});
+
+test('Part 1 Order Submission: accepts compressed inline slip fallback and blocks oversized raw base64 (> 380KB)', () => {
+  const smallInlineSlip = 'data:image/jpeg;base64,' + 'A'.repeat(120 * 1024);
+  const okResult = validateOrderSubmissionPayload({
+    hensCount: 10,
+    amount: 8000,
+    tid: 'TRX-8000-COMPRESSED',
+    proofSlipUrl: smallInlineSlip,
+  });
+  assert.equal(okResult.valid, true);
+
+  // Oversized uncompressed screenshot (> MAX_FIRESTORE_SLIP_DATAURL_BYTES) must be rejected cleanly before Firestore setDoc
+  const oversizedSlip = 'data:image/png;base64,' + 'B'.repeat(MAX_FIRESTORE_SLIP_DATAURL_BYTES + 2048);
+  const blockedResult = validateOrderSubmissionPayload({
+    hensCount: 10,
+    amount: 8000,
+    tid: 'TRX-8000-HUGE',
+    proofSlipUrl: oversizedSlip,
+  });
+  assert.equal(blockedResult.valid, false);
+  assert.ok(blockedResult.error && blockedResult.error.includes('too large'));
+
+  // Missing slip or mismatched amount rejected cleanly
+  const missingSlip = validateOrderSubmissionPayload({
+    hensCount: 10,
+    amount: 8000,
+    tid: 'TRX-8000-NOSLIP',
+    proofSlipUrl: '',
+  });
+  assert.equal(missingSlip.valid, false);
+
+  const wrongAmount = validateOrderSubmissionPayload({
+    hensCount: 10,
+    amount: 4000,
+    tid: 'TRX-MISMATCH',
+    proofSlipUrl: '/uploads/slips/ok.jpg',
+  });
+  assert.equal(wrongAmount.valid, false);
+});
+
+test('Part 1 Order Submission: sanitizeFirestorePayload strips undefined fields cleanly', () => {
+  const raw = {
+    id: 'ORD-1',
+    amount: 8000,
+    hensCount: 10,
+    paymentMethodId: undefined,
+    nested: { keep: 'yes', drop: undefined },
+    list: [{ a: 1, b: undefined }],
+  };
+  const clean = sanitizeFirestorePayload(raw);
+  assert.equal('paymentMethodId' in clean, false);
+  assert.equal('drop' in clean.nested, false);
+  assert.equal(clean.nested.keep, 'yes');
+  assert.equal('b' in clean.list[0], false);
+  assert.equal(clean.amount, 8000);
+});
+
+test('Part 1 Optimized Order Approval: computeIncrementalShedAndGlobalStats updates ONLY assigned shed & global stats without scanning users', () => {
+  const initial = mergeAllSheds([
+    {
+      id: 'Shed-101',
+      nameEn: 'Shed-101',
+      nameUr: 'شیڈ-101',
+      capacity: 5000,
+      totalHens: 120,
+      dailyEggCollection: 120,
+      crackedEggsCount: 5,
+      mortalityCount: 1,
+      crackedEggRate: 4.17,
+      hasSicknessAlert: false,
+      lastUpdated: '2026-11-10T00:00:00Z',
+    },
+    {
+      id: 'Shed-102',
+      nameEn: 'Shed-102',
+      nameUr: 'شیڈ-102',
+      capacity: 5000,
+      totalHens: 80,
+      dailyEggCollection: 80,
+      crackedEggsCount: 2,
+      mortalityCount: 0,
+      crackedEggRate: 2.5,
+      hasSicknessAlert: false,
+      lastUpdated: '2026-11-10T00:00:00Z',
+    },
+  ]);
+
+  // Approve a 10-hen (Rs. 8,000) order assigned to Shed-101
+  const { updatedShed, updatedSheds, updatedGlobalStats } = computeIncrementalShedAndGlobalStats(
+    initial,
+    'Shed-101',
+    10,
+    '2026-11-19T12:00:00Z'
+  );
+
+  // Only Shed-101 changed
+  assert.equal(updatedShed.id, 'Shed-101');
+  assert.equal(updatedShed.totalHens, 130);
+  assert.equal(updatedShed.dailyEggCollection, 130);
+  assert.equal(updatedShed.netFreshEggs, 125); // 130 - 5 cracked
+
+  // Shed-102 untouched
+  const shed102 = updatedSheds.find((s) => s.id === 'Shed-102');
+  assert.equal(shed102?.totalHens, 80);
+
+  // Global stats reflect incremental addition across all 5 sheds
+  assert.equal(updatedGlobalStats.totalActiveHens, 210); // 130 + 80
+  assert.equal(updatedGlobalStats.totalCollected, 210);
+  assert.equal(updatedGlobalStats.cracked, 7); // 5 + 2
+  assert.equal(updatedGlobalStats.netFresh, 203); // 210 - 7
+  assert.equal(updatedGlobalStats.shedCount, 5);
 });
 
 

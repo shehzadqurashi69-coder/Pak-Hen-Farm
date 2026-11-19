@@ -136,6 +136,7 @@ export interface HenOrder {
   senderEasypaisaNumber?: string;
   senderEasypaisaTitle?: string;
   tid: string; // Transaction ID / Hash
+  tidNormalized?: string; // Lowercase trimmed TrxID for indexed duplicate lookups
   status: OrderStatus;
   submittedAt: string;
   reviewedAt?: string;
@@ -144,7 +145,8 @@ export interface HenOrder {
   shedId?: string;
   paymentMethodId?: string;
   paymentMethodTitle?: string;
-  proofSlipUrl?: string; // Base64 data URL of user's payment slip / screenshot
+  proofSlipUrl?: string; // Server URL (/uploads/slips/...) or compressed JPEG data URL
+  proofSlipSizeBytes?: number;
 }
 
 export type PaymentMethodType = 'jazzcash' | 'easypaisa' | 'bank' | 'usdt' | 'other';

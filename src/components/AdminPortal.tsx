@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   UserAccount,
   HenOrder,
@@ -8,32 +8,29 @@ import {
   MedicalPaymentOrder,
   PaymentAccount,
   PaymentMethodType,
-  PaymentSettings,
   SupportTicket,
   FarmBanner,
   FarmGalleryItem,
   FarmProfileSettings,
 } from '../types/farm';
 import {
-  apiGetOrders,
+  apiGetAdminOrders,
   apiApproveOrder,
   apiRejectOrder,
-  apiGetWithdrawals,
+  apiGetAdminWithdrawals,
   apiMarkWithdrawalPaid,
   apiRejectWithdrawal,
   apiGetStats,
   apiUpdateStats,
   apiSyncGlobalStatsFromSheds,
-  apiGetUsers,
-  subscribeToOrders,
-  subscribeToUsers,
-  subscribeToWithdrawals,
-  subscribeToGlobalStats,
-  subscribeToSheds,
-  subscribeToMedicalPayments,
-  subscribeToPaymentMethods,
-  subscribeToPaymentSettings,
-  subscribeToTickets,
+  apiGetAdminUsers,
+  apiGetSheds,
+  apiGetAdminMedicalPayments,
+  apiGetPaymentMethods,
+  apiGetPaymentSettings,
+  apiGetAdminTickets,
+  apiGetBanners,
+  apiGetGallery,
   apiAddPaymentMethod,
   apiUpdatePaymentMethod,
   apiDeletePaymentMethod,
@@ -46,10 +43,8 @@ import {
   apiApproveMedicalPayment,
   apiRejectMedicalPayment,
   apiSendAdminCustomMessage,
-  subscribeToBanners,
   cloudSaveBanners,
   cloudUpdateBanner,
-  subscribeToGallery,
   cloudSaveGallery,
   cloudAddGalleryItem,
   cloudDeleteGalleryItem,
@@ -58,6 +53,7 @@ import {
   cloudToggleTicketRead,
   cleanFakeUsers,
   apiUploadMedia,
+  getFriendlyErrorMessage,
 } from '../services/api';
 import {
   INITIAL_SHEDS,
@@ -139,13 +135,23 @@ interface AdminPortalProps {
   farmProfile?: FarmProfileSettings;
 }
 
+type AdminTabId =
+  | 'orders'
+  | 'withdrawals'
+  | 'payment_methods'
+  | 'banners'
+  | 'gallery'
+  | 'sos_inbox'
+  | 'medical'
+  | 'sheds'
+  | 'users'
+  | 'stats';
+
 export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmProfile }) => {
   const strings = t[lang];
   const isUr = lang === 'ur';
 
-  const [activeTab, setActiveTab] = useState<
-    'orders' | 'withdrawals' | 'payment_methods' | 'banners' | 'gallery' | 'sos_inbox' | 'medical' | 'sheds' | 'users' | 'stats'
-  >('orders');
+  const [activeTab, setActiveTab] = useState<AdminTabId>('orders');
 
   const [orders, setOrders] = useState<HenOrder[]>([]);
   const [withdrawals, setWithdrawals] = useState<WithdrawalRequest[]>([]);
@@ -156,7 +162,14 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
     lastUpdated: new Date().toISOString(),
   });
   const [usersList, setUsersList] = useState<UserAccount[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [isRefreshingTab, setIsRefreshingTab] = useState(false);
+  const [tabError, setTabError] = useState<string | null>(null);
+  const [loadedTabs, setLoadedTabs] = useState<Partial<Record<AdminTabId, boolean>>>({});
+  const inFlightTabRef = useRef<Partial<Record<AdminTabId, boolean>>>({});
+  const [orderActionMessage, setOrderActionMessage] = useState<string | null>(null);
+  const [orderActionError, setOrderActionError] = useState<string | null>(null);
+  const [orderStatusFilter, setOrderStatusFilter] = useState<'all' | 'pending' | 'approved' | 'rejected'>('all');
 
   // Dynamic Payment Methods State (Admin Control)
   const [paymentMethods, setPaymentMethods] = useState<PaymentAccount[]>([]);
@@ -284,115 +297,118 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
   const [approvingMedId, setApprovingMedId] = useState<Record<string, boolean>>({});
   const [medicalActionMessage, setMedicalActionMessage] = useState<string | null>(null);
 
-  const loadAllAdminData = async () => {
-    try {
-      setLoading(true);
-      const [fetchedOrders, fetchedWithdrawals, fetchedStats, fetchedUsers] = await Promise.all([
-        apiGetOrders(adminUser),
-        apiGetWithdrawals(adminUser),
-        apiGetStats(),
-        apiGetUsers(adminUser),
-      ]);
-      setOrders(fetchedOrders);
-      setWithdrawals(fetchedWithdrawals);
-      setGlobalStats(fetchedStats);
-      setTotalCollectedInput(String(fetchedStats.totalCollected || 0));
-      setCrackedInput(String(fetchedStats.cracked || 0));
-      setUsersList(fetchedUsers);
-    } catch (err) {
-      console.error('Error fetching admin data:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const selectedShedIdRef = useRef(selectedShedId);
+  selectedShedIdRef.current = selectedShedId;
 
+  /**
+   * TAB-BASED LAZY LOADING (Firebase Free-Tier Optimization):
+   * Fetches ONLY the active tab's Firestore records (cached with short-lived TTL).
+   * Never preloads all 10 admin collections on login or on manual Refresh.
+   */
+  const loadTabData = useCallback(
+    async (tab: AdminTabId, forceRefresh: boolean = false) => {
+      if (inFlightTabRef.current[tab]) return;
+      inFlightTabRef.current[tab] = true;
+      setTabError(null);
+      if (forceRefresh) {
+        setIsRefreshingTab(true);
+      } else {
+        setLoading(true);
+      }
+
+      try {
+        switch (tab) {
+          case 'orders': {
+            const fetchedOrders = await apiGetAdminOrders(120, forceRefresh);
+            setOrders(fetchedOrders);
+            break;
+          }
+          case 'withdrawals': {
+            const fetchedWithdrawals = await apiGetAdminWithdrawals(120, forceRefresh);
+            setWithdrawals(fetchedWithdrawals);
+            break;
+          }
+          case 'payment_methods': {
+            const [methods, settings] = await Promise.all([
+              apiGetPaymentMethods(forceRefresh),
+              apiGetPaymentSettings(forceRefresh),
+            ]);
+            setPaymentMethods(methods);
+            if (settings) {
+              setCustomGreeting(settings.customGreeting || '');
+              setCustomGreetingUr(settings.customGreetingUr || '');
+            }
+            break;
+          }
+          case 'banners': {
+            const liveBanners = await apiGetBanners(forceRefresh);
+            if (liveBanners && liveBanners.length > 0) {
+              setBannersList(liveBanners);
+            }
+            break;
+          }
+          case 'gallery': {
+            const liveItems = await apiGetGallery(forceRefresh);
+            if (liveItems && liveItems.length > 0) {
+              setGalleryList(liveItems);
+            }
+            break;
+          }
+          case 'sos_inbox': {
+            const liveTickets = await apiGetAdminTickets(100, forceRefresh);
+            setTickets(liveTickets);
+            break;
+          }
+          case 'medical': {
+            const liveMed = await apiGetAdminMedicalPayments(100, forceRefresh);
+            setMedicalPayments(liveMed);
+            break;
+          }
+          case 'sheds': {
+            // Reads ONLY the 5 fixed shed documents (Shed-101..Shed-105) — 0 users scan
+            const liveSheds = await apiGetSheds(forceRefresh);
+            setSheds(liveSheds);
+            const current = liveSheds.find((s) => s.id === selectedShedIdRef.current) || liveSheds[0];
+            if (current) {
+              setCrackedRateInput(String(getShedCrackedEggsCount(current)));
+              setDailyEggCollectionInput(String(current.dailyEggCollection ?? current.totalHens ?? 0));
+            }
+            break;
+          }
+          case 'users': {
+            const liveUsers = await apiGetAdminUsers(150, forceRefresh);
+            setUsersList(liveUsers);
+            break;
+          }
+          case 'stats': {
+            const [liveStats, liveSheds] = await Promise.all([
+              apiGetStats(forceRefresh),
+              apiGetSheds(forceRefresh),
+            ]);
+            setGlobalStats(liveStats);
+            setTotalCollectedInput(String(liveStats.totalCollected || 0));
+            setCrackedInput(String(liveStats.cracked || 0));
+            setSheds(liveSheds);
+            break;
+          }
+        }
+        setLoadedTabs((prev) => ({ ...prev, [tab]: true }));
+      } catch (err: any) {
+        console.error(`Error loading admin tab [${tab}]:`, err);
+        setTabError(getFriendlyErrorMessage(err, lang));
+      } finally {
+        inFlightTabRef.current[tab] = false;
+        setLoading(false);
+        setIsRefreshingTab(false);
+      }
+    },
+    [lang]
+  );
+
+  // Load ONLY the currently active tab on mount and on tab switches (reusing cache automatically)
   useEffect(() => {
-    setLoading(true);
-
-    // 1. Live Orders subscription
-    const unsubOrders = subscribeToOrders('admin', adminUser.id, (liveOrders) => {
-      setOrders(liveOrders);
-      setLoading(false);
-    });
-
-    // 2. Live Users Directory subscription
-    const unsubUsers = subscribeToUsers((liveUsers) => {
-      setUsersList(liveUsers);
-    });
-
-    // 3. Live Withdrawals subscription
-    const unsubWithdrawals = subscribeToWithdrawals('admin', adminUser.id, (liveWithdrawals) => {
-      setWithdrawals(liveWithdrawals);
-    });
-
-    // 4. Live Global Stats subscription
-    const unsubStats = subscribeToGlobalStats((liveStats) => {
-      setGlobalStats(liveStats);
-      setTotalCollectedInput(String(liveStats.totalCollected || 0));
-      setCrackedInput(String(liveStats.cracked || 0));
-    });
-
-    // 5. Live Sheds subscription
-    const unsubSheds = subscribeToSheds((liveSheds) => {
-      setSheds(liveSheds);
-      const current = liveSheds.find((s) => s.id === selectedShedId);
-      if (current) {
-        setCrackedRateInput(String(getShedCrackedEggsCount(current)));
-        setDailyEggCollectionInput(String(current.dailyEggCollection ?? current.totalHens ?? 0));
-      }
-    });
-
-    // 6. Live Medical Payments subscription
-    const unsubMedical = subscribeToMedicalPayments((liveMed) => {
-      setMedicalPayments(liveMed);
-    });
-
-    // 7. Live Payment Methods subscription (Admin Managed Accounts)
-    const unsubPm = subscribeToPaymentMethods((liveMethods) => {
-      setPaymentMethods(liveMethods);
-    });
-
-    // 8. Live Support / SOS Tickets subscription
-    const unsubTickets = subscribeToTickets('admin', adminUser.id, (liveTickets) => {
-      setTickets(liveTickets);
-    });
-
-    // 9. Live Payment Settings subscription (Custom Greeting)
-    const unsubSettings = subscribeToPaymentSettings((settings) => {
-      if (settings) {
-        setCustomGreeting(settings.customGreeting || '');
-        setCustomGreetingUr(settings.customGreetingUr || '');
-      }
-    });
-
-    // 10. Live Ads Banners subscription
-    const unsubBanners = subscribeToBanners((liveBanners) => {
-      if (liveBanners && liveBanners.length > 0) {
-        setBannersList(liveBanners);
-      }
-    });
-
-    // 11. Live Farm Gallery subscription (Photos & Videos)
-    const unsubGallery = subscribeToGallery((liveItems) => {
-      if (liveItems && liveItems.length > 0) {
-        setGalleryList(liveItems);
-      }
-    });
-
-    return () => {
-      unsubOrders();
-      unsubUsers();
-      unsubWithdrawals();
-      unsubStats();
-      unsubSheds();
-      unsubMedical();
-      unsubPm();
-      unsubTickets();
-      unsubSettings();
-      unsubBanners();
-      unsubGallery();
-    };
-  }, [adminUser.id, selectedShedId]);
+    loadTabData(activeTab, false);
+  }, [activeTab, adminUser.id, loadTabData]);
 
   // Financial calculations
   const totalApprovedDeposits = orders
@@ -419,16 +435,22 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
 
   const netFarmBalance = totalApprovedDeposits - totalPaidOut;
 
-  // Actions without window.prompt
+  // Actions without window.prompt or window.alert, updating local tab state directly (0 full reloads)
   const handleApproveMedical = async (orderId: string) => {
     if (approvingMedId[orderId]) return;
     setApprovingMedId((prev) => ({ ...prev, [orderId]: true }));
     setMedicalActionMessage(null);
+    setTabError(null);
     try {
       await apiApproveMedicalPayment(adminUser, orderId);
+      setMedicalPayments((prev) =>
+        prev.map((m) =>
+          m.id === orderId ? { ...m, status: 'approved', processedAt: new Date().toISOString() } : m
+        )
+      );
       setMedicalActionMessage(strings.medicalTidApprovedSuccess);
     } catch (err: any) {
-      alert(err.message || 'Error approving medical payment');
+      setTabError(getFriendlyErrorMessage(err, lang));
     } finally {
       setApprovingMedId((prev) => {
         const next = { ...prev };
@@ -439,22 +461,58 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
   };
 
   const handleRejectMedical = async (orderId: string) => {
+    setTabError(null);
     try {
       await apiRejectMedicalPayment(adminUser, orderId, 'Payment could not be verified on farm accounts');
+      setMedicalPayments((prev) =>
+        prev.map((m) =>
+          m.id === orderId
+            ? {
+                ...m,
+                status: 'rejected',
+                adminNote: 'Payment could not be verified on farm accounts',
+                processedAt: new Date().toISOString(),
+              }
+            : m
+        )
+      );
       setMedicalActionMessage(strings.medicalTidRejectedSuccess);
     } catch (err: any) {
-      alert(err.message || 'Error rejecting medical payment');
+      setTabError(getFriendlyErrorMessage(err, lang));
     }
   };
 
   const handleApproveOrder = async (orderId: string) => {
     if (approvingOrderIds[orderId]) return;
+    setOrderActionMessage(null);
+    setOrderActionError(null);
+    setTabError(null);
     setApprovingOrderIds((prev) => ({ ...prev, [orderId]: true }));
     try {
-      await apiApproveOrder(adminUser, orderId, 'Verified and approved by Admin');
-      await loadAllAdminData();
+      // Optimized approval: reads & updates ONLY the specific order, buyer user, and assigned shed.
+      const summary = await apiApproveOrder(adminUser, orderId, 'Verified and approved by Admin');
+      const nowIso = new Date().toISOString();
+      setOrders((prev) =>
+        prev.map((o) =>
+          o.id === orderId
+            ? { ...o, status: 'approved', processedAt: nowIso, adminNote: 'Verified and approved by Admin' }
+            : o
+        )
+      );
+      const updatedBuyer = summary?.updatedUser;
+      if (updatedBuyer?.id) {
+        setUsersList((prev) =>
+          prev.map((u) => (u.id === updatedBuyer.id ? updatedBuyer : u))
+        );
+      }
+      setOrderActionMessage(
+        isUr
+          ? `آرڈر منظور ہو گیا! +${summary.hensCount} مرغیاں (Rs. ${summary.amount.toLocaleString()}) کو ${summary.assignedShedId} میں شامل کر دیا گیا۔`
+          : `Order approved! +${summary.hensCount} ${summary.hensCount === 1 ? 'Hen' : 'Hens'} (PKR ${summary.amount.toLocaleString()}) assigned to ${summary.assignedShedId}.`
+      );
+      setTimeout(() => setOrderActionMessage(null), 5000);
     } catch (err: any) {
-      alert(err.message || 'Error approving order');
+      setOrderActionError(getFriendlyErrorMessage(err, lang));
     } finally {
       setApprovingOrderIds((prev) => {
         const next = { ...prev };
@@ -465,19 +523,36 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
   };
 
   const handleOpenRejectOrder = (order: HenOrder) => {
+    setOrderActionError(null);
     setRejectOrderTarget(order);
     setActionReasonNote('Payment slip or TxID could not be verified');
   };
 
   const handleConfirmRejectOrder = async () => {
     if (!rejectOrderTarget) return;
+    setOrderActionMessage(null);
+    setOrderActionError(null);
     try {
       setIsProcessingAction(true);
-      await apiRejectOrder(adminUser, rejectOrderTarget.id, actionReasonNote || 'Payment not verified');
+      const note = actionReasonNote || 'Payment not verified';
+      await apiRejectOrder(adminUser, rejectOrderTarget.id, note);
+      const rejectedId = rejectOrderTarget.id;
+      setOrders((prev) =>
+        prev.map((o) =>
+          o.id === rejectedId
+            ? { ...o, status: 'rejected', processedAt: new Date().toISOString(), adminNote: note }
+            : o
+        )
+      );
       setRejectOrderTarget(null);
-      await loadAllAdminData();
+      setOrderActionMessage(
+        isUr
+          ? `آرڈر (${rejectedId}) مسترد کر دیا گیا۔`
+          : `Order (${rejectedId}) marked as rejected.`
+      );
+      setTimeout(() => setOrderActionMessage(null), 4000);
     } catch (err: any) {
-      alert(err.message || 'Error rejecting order');
+      setOrderActionError(getFriendlyErrorMessage(err, lang));
     } finally {
       setIsProcessingAction(false);
     }
@@ -490,13 +565,20 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
 
   const handleConfirmMarkPaid = async () => {
     if (!markPaidTarget) return;
+    setTabError(null);
     try {
       setIsProcessingAction(true);
-      await apiMarkWithdrawalPaid(adminUser, markPaidTarget.id, actionReasonNote || 'Dispatched via Easypaisa');
+      const note = actionReasonNote || 'Dispatched via Easypaisa';
+      await apiMarkWithdrawalPaid(adminUser, markPaidTarget.id, note);
+      const paidId = markPaidTarget.id;
+      setWithdrawals((prev) =>
+        prev.map((w) =>
+          w.id === paidId ? { ...w, status: 'paid', processedAt: new Date().toISOString(), adminNote: note } : w
+        )
+      );
       setMarkPaidTarget(null);
-      await loadAllAdminData();
     } catch (err: any) {
-      alert(err.message || 'Error marking withdrawal as paid');
+      setTabError(getFriendlyErrorMessage(err, lang));
     } finally {
       setIsProcessingAction(false);
     }
@@ -509,13 +591,22 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
 
   const handleConfirmRejectWithdrawal = async () => {
     if (!rejectWithdrawalTarget) return;
+    setTabError(null);
     try {
       setIsProcessingAction(true);
-      await apiRejectWithdrawal(adminUser, rejectWithdrawalTarget.id, actionReasonNote || 'Rejected by Admin');
+      const reason = actionReasonNote || 'Rejected by Admin';
+      await apiRejectWithdrawal(adminUser, rejectWithdrawalTarget.id, reason);
+      const rejectedId = rejectWithdrawalTarget.id;
+      setWithdrawals((prev) =>
+        prev.map((w) =>
+          w.id === rejectedId
+            ? { ...w, status: 'rejected', processedAt: new Date().toISOString(), adminNote: reason }
+            : w
+        )
+      );
       setRejectWithdrawalTarget(null);
-      await loadAllAdminData();
     } catch (err: any) {
-      alert(err.message || 'Error rejecting withdrawal');
+      setTabError(getFriendlyErrorMessage(err, lang));
     } finally {
       setIsProcessingAction(false);
     }
@@ -586,7 +677,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
     try {
       setIsSavingPm(true);
       if (editingPmId) {
-        await apiUpdatePaymentMethod(adminUser, editingPmId, {
+        const updates: Partial<PaymentAccount> = {
           type: pmType,
           title: pmTitle.trim(),
           titleUr: pmTitleUr.trim(),
@@ -599,10 +690,14 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
           active: pmActive,
           isActive: pmActive,
           status: pmActive ? 'active' : 'disabled',
-        });
+        };
+        await apiUpdatePaymentMethod(adminUser, editingPmId, updates);
+        setPaymentMethods((prev) =>
+          prev.map((pm) => (pm.id === editingPmId ? { ...pm, ...updates } : pm))
+        );
         setPmActionMessage('Payment method updated successfully.');
       } else {
-        await apiAddPaymentMethod(adminUser, {
+        const created = await apiAddPaymentMethod(adminUser, {
           type: pmType,
           title: pmTitle.trim(),
           titleUr: pmTitleUr.trim(),
@@ -617,12 +712,13 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
           status: pmActive ? 'active' : 'disabled',
           displayOrder: paymentMethods.length + 1,
         });
+        setPaymentMethods((prev) => [...prev, created]);
         setPmActionMessage('New payment method added successfully.');
       }
       setIsEditingPm(false);
       setTimeout(() => setPmActionMessage(null), 3500);
     } catch (err: any) {
-      setPmErrorMessage(err.message || 'Error saving payment method');
+      setPmErrorMessage(getFriendlyErrorMessage(err, lang));
     } finally {
       setIsSavingPm(false);
     }
@@ -640,7 +736,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
       setGreetingActionMessage('Custom checkout greeting saved live!');
       setTimeout(() => setGreetingActionMessage(null), 3500);
     } catch (err: any) {
-      setPmErrorMessage(err.message || 'Error saving checkout greeting');
+      setPmErrorMessage(getFriendlyErrorMessage(err, lang));
     } finally {
       setIsSavingGreeting(false);
     }
@@ -650,10 +746,11 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
     setPmErrorMessage(null);
     try {
       await apiDeletePaymentMethod(adminUser, id);
+      setPaymentMethods((prev) => prev.filter((pm) => pm.id !== id));
       setPmActionMessage('Payment account deleted.');
       setTimeout(() => setPmActionMessage(null), 3500);
     } catch (err: any) {
-      setPmErrorMessage(err.message || 'Error deleting payment method');
+      setPmErrorMessage(getFriendlyErrorMessage(err, lang));
     }
   };
 
@@ -665,8 +762,15 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
         isActive: nextActive,
         status: nextActive ? 'active' : 'disabled',
       });
+      setPaymentMethods((prev) =>
+        prev.map((item) =>
+          item.id === pm.id
+            ? { ...item, active: nextActive, isActive: nextActive, status: nextActive ? 'active' : 'disabled' }
+            : item
+        )
+      );
     } catch (err: any) {
-      setPmErrorMessage(err.message || 'Error toggling payment method');
+      setPmErrorMessage(getFriendlyErrorMessage(err, lang));
     }
   };
 
@@ -704,7 +808,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
       setBannerFeedbackMsg(isUr ? 'بینر کامیابی سے اپ ڈیٹ ہو گیا!' : `Banner #${banner.order} saved successfully!`);
       setTimeout(() => setBannerFeedbackMsg(null), 3500);
     } catch (err: any) {
-      alert(err.message || 'Error updating banner');
+      setBannerFeedbackMsg(getFriendlyErrorMessage(err, lang));
     } finally {
       setIsSavingBanners(false);
     }
@@ -717,7 +821,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
       setBannerFeedbackMsg(isUr ? 'تمام بینرز کامیابی سے محفوظ ہو گئے!' : 'All 4 banners saved and synced live!');
       setTimeout(() => setBannerFeedbackMsg(null), 3500);
     } catch (err: any) {
-      alert(err.message || 'Error saving banners');
+      setBannerFeedbackMsg(getFriendlyErrorMessage(err, lang));
     } finally {
       setIsSavingBanners(false);
     }
@@ -838,6 +942,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
       };
 
       await cloudAddGalleryItem(newItem);
+      setGalleryList((prev) => [newItem, ...prev.filter((g) => g.id !== newItem.id)]);
       setGalleryFeedbackMsg(isUr ? 'میڈیا کامیابی سے فارم گیلری میں شامل کر دیا گیا!' : 'New media added to Farm Gallery successfully!');
       // Reset form
       setNewGalleryTitle('');
@@ -849,7 +954,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
       setNewGalleryDuration('');
       setTimeout(() => setGalleryFeedbackMsg(null), 3500);
     } catch (err: any) {
-      setGalleryFeedbackMsg(err.message || 'Error adding media to gallery');
+      setGalleryFeedbackMsg(getFriendlyErrorMessage(err, lang));
     } finally {
       setIsSavingGallery(false);
     }
@@ -1043,16 +1148,27 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
   const handleSendTicketReply = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedTicketForReply || !ticketReplyText.trim()) return;
+    setTabError(null);
 
     try {
       setIsReplyingTicket(true);
-      await apiReplyTicket(adminUser, selectedTicketForReply.id, ticketReplyText.trim());
+      const replyBody = ticketReplyText.trim();
+      await apiReplyTicket(adminUser, selectedTicketForReply.id, replyBody);
+      const repliedId = selectedTicketForReply.id;
+      const repliedAt = new Date().toISOString();
+      setTickets((prev) =>
+        prev.map((tk) =>
+          tk.id === repliedId
+            ? { ...tk, status: 'resolved', staffReply: replyBody, repliedAt, read: true }
+            : tk
+        )
+      );
       setTicketSuccessMsg('Reply sent and ticket resolved successfully!');
       setSelectedTicketForReply(null);
       setTicketReplyText('');
       setTimeout(() => setTicketSuccessMsg(null), 4000);
     } catch (err: any) {
-      alert(err.message || 'Error replying to ticket');
+      setTabError(getFriendlyErrorMessage(err, lang));
     } finally {
       setIsReplyingTicket(false);
     }
@@ -1060,6 +1176,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
 
   const handleUpdateStats = async (e: React.FormEvent) => {
     e.preventDefault();
+    setTabError(null);
     const total = parseInt(totalCollectedInput, 10) || 0;
     const cracked = parseInt(crackedInput, 10) || 0;
     const net = Math.max(0, total - cracked);
@@ -1075,7 +1192,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
       setStatsSyncMessage(null);
       setTimeout(() => setStatsSuccess(false), 3000);
     } catch (err: any) {
-      alert(err.message || 'Error updating stats');
+      setTabError(getFriendlyErrorMessage(err, lang));
     }
   };
 
@@ -1145,12 +1262,15 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
     try {
       setShedActionLoading(true);
       await apiApplyShedMortality(adminUser, selectedShedId, deaths);
+      // Reload ONLY the 5 shed docs (5 reads) so updated mortality & totalHens display accurately
+      const freshSheds = await apiGetSheds(true);
+      setSheds(freshSheds);
       setShedSuccessMessage(
         strings.mortalityAppliedSuccess.replace('{count}', String(deaths))
       );
       setMortalityDeathsInput('');
     } catch (err: any) {
-      setShedErrorMessage(err.message || 'Failed to apply mortality deduction');
+      setShedErrorMessage(getFriendlyErrorMessage(err, lang));
     } finally {
       setShedActionLoading(false);
     }
@@ -1189,7 +1309,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
           .replace('{cracked}', String(crackedCount))
       );
     } catch (err: any) {
-      setShedErrorMessage(err.message || 'Failed to update shed egg log');
+      setShedErrorMessage(getFriendlyErrorMessage(err, lang));
     } finally {
       setShedActionLoading(false);
     }
@@ -1201,6 +1321,11 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
     try {
       setShedActionLoading(true);
       await apiDeclareShedSickness(adminUser, selectedShedId, isSick);
+      setSheds((prev) =>
+        mergeAllSheds(prev).map((s) =>
+          s.id === selectedShedId ? { ...s, hasSicknessAlert: isSick } : s
+        )
+      );
       if (isSick) {
         setShedSuccessMessage(
           strings.sicknessAlertSentSuccess.replace('{shedId}', selectedShedId)
@@ -1211,7 +1336,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
         );
       }
     } catch (err: any) {
-      setShedErrorMessage(err.message || 'Failed to update sickness status');
+      setShedErrorMessage(getFriendlyErrorMessage(err, lang));
     } finally {
       setShedActionLoading(false);
     }
@@ -1257,8 +1382,9 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
 
   const handleSendCustomMessage = async (e: React.FormEvent) => {
     e.preventDefault();
+    setTabError(null);
     if (!customMsgSubject.trim() || !customMsgBody.trim()) {
-      alert(isUr ? 'براہ کرم عنوان اور پیغام درج کریں۔' : 'Please provide both subject and message body.');
+      setTabError(isUr ? 'براہ کرم عنوان اور پیغام درج کریں۔' : 'Please provide both subject and message body.');
       return;
     }
     try {
@@ -1279,7 +1405,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
       setCustomMsgBody('');
       setTimeout(() => setUserActionMessage(null), 4000);
     } catch (err: any) {
-      alert(err.message || 'Error sending custom message');
+      setTabError(getFriendlyErrorMessage(err, lang));
     } finally {
       setIsSendingCustomMsg(false);
     }
@@ -1321,58 +1447,101 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
         </div>
 
         <button
-          onClick={loadAllAdminData}
-          className="flex items-center gap-1.5 rounded-xl border border-[#d4af37]/40 bg-[#0a2618] px-3 py-1.5 text-xs font-bold text-[#f3df88] hover:bg-[#0f3422] cursor-pointer self-start sm:self-auto active:scale-95 transition-all"
+          type="button"
+          onClick={() => loadTabData(activeTab, true)}
+          disabled={isRefreshingTab || loading}
+          className="flex items-center gap-1.5 rounded-xl border border-[#d4af37]/40 bg-[#0a2618] px-3.5 py-2 text-xs font-bold text-[#f3df88] hover:bg-[#0f3422] cursor-pointer self-start sm:self-auto active:scale-95 transition-all disabled:opacity-55 disabled:cursor-not-allowed"
         >
-          <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
-          <span>{isUr ? 'تازہ کریں' : 'Refresh Data'}</span>
+          <RefreshCw className={`h-3.5 w-3.5 ${isRefreshingTab || loading ? 'animate-spin' : ''}`} />
+          <span>
+            {isRefreshingTab || loading
+              ? isUr
+                ? 'لوڈ ہو رہا ہے...'
+                : 'Refreshing...'
+              : isUr
+              ? 'موجودہ ٹیب ریفریش کریں'
+              : 'Refresh Tab'}
+          </span>
         </button>
       </div>
 
-      {/* Admin Financial Overview ('My Wallet') & Users Statistics Box */}
+      {/* Graceful Non-Blocking Tab / Quota Error Banner */}
+      {tabError && (
+        <div className="flex items-start justify-between gap-3 rounded-2xl border border-amber-500/50 bg-amber-950/75 px-4 py-3 text-xs text-amber-100 shadow-lg">
+          <div className="flex items-start gap-2.5">
+            <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400 mt-0.5" />
+            <span className="leading-relaxed">{tabError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setTabError(null)}
+            aria-label={isUr ? 'بند کریں' : 'Dismiss error'}
+            className="shrink-0 rounded-lg p-1 text-amber-300 hover:bg-amber-900/50 cursor-pointer"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Admin Financial Overview ('My Wallet') & Users Statistics Box (Lazy Tab-Aware) */}
       <div className="rounded-3xl border border-[#d4af37]/40 bg-gradient-to-br from-[#0a2618] via-[#0d3420] to-[#051a10] p-6 shadow-2xl backdrop-blur-md space-y-4">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-center gap-2">
             <Wallet className="h-5 w-5 text-[#d4af37]" />
             <h3 className="text-base font-bold text-[#f4efe6]">{strings.adminWalletOverview}</h3>
           </div>
           <span className="text-[11px] font-semibold text-[#d4af37] bg-[#051a10] px-2.5 py-1 rounded-full border border-[#d4af37]/30">
-            {isUr ? 'مرکزی کلاؤڈ ڈیٹا بیس' : 'Centralized Cloud Database'}
+            {isUr ? 'مرکزی کلاؤڈ ڈیٹا بیس • ٹیب بیسڈ لوڈنگ' : 'Centralized Cloud DB • On-Demand Tab Loading'}
           </span>
         </div>
 
         {/* 5 Statistics Boxes Grid */}
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3.5">
           {/* Total Approved Deposits */}
-          <div className="rounded-2xl border border-[#d4af37]/20 bg-[#051a10]/70 p-3.5 space-y-1">
+          <div
+            onClick={() => setActiveTab('orders')}
+            role="button"
+            tabIndex={0}
+            className="rounded-2xl border border-[#d4af37]/20 bg-[#051a10]/70 p-3.5 space-y-1 cursor-pointer hover:border-[#d4af37]/50 transition-colors"
+          >
             <div className="flex items-center gap-1.5 text-[11px] font-bold text-emerald-400">
               <ArrowDownLeft className="h-3.5 w-3.5" />
               <span>{strings.adminTotalDeposits}</span>
             </div>
             <div className="text-lg sm:text-xl font-black text-emerald-300">
-              Rs. {totalApprovedDeposits.toLocaleString()}
+              {loadedTabs.orders ? `Rs. ${totalApprovedDeposits.toLocaleString()}` : isUr ? 'ٹیب کھولیں' : 'Open Orders'}
             </div>
           </div>
 
           {/* Total Payouts Completed */}
-          <div className="rounded-2xl border border-[#d4af37]/20 bg-[#051a10]/70 p-3.5 space-y-1">
+          <div
+            onClick={() => setActiveTab('withdrawals')}
+            role="button"
+            tabIndex={0}
+            className="rounded-2xl border border-[#d4af37]/20 bg-[#051a10]/70 p-3.5 space-y-1 cursor-pointer hover:border-[#d4af37]/50 transition-colors"
+          >
             <div className="flex items-center gap-1.5 text-[11px] font-bold text-amber-400">
               <ArrowUpRight className="h-3.5 w-3.5" />
               <span>{strings.adminTotalPaidOut}</span>
             </div>
             <div className="text-lg sm:text-xl font-black text-amber-300">
-              Rs. {totalPaidOut.toLocaleString()}
+              {loadedTabs.withdrawals ? `Rs. ${totalPaidOut.toLocaleString()}` : isUr ? 'ٹیب کھولیں' : 'Open Payouts'}
             </div>
           </div>
 
           {/* Pending Payouts */}
-          <div className="rounded-2xl border border-[#d4af37]/20 bg-[#051a10]/70 p-3.5 space-y-1">
+          <div
+            onClick={() => setActiveTab('withdrawals')}
+            role="button"
+            tabIndex={0}
+            className="rounded-2xl border border-[#d4af37]/20 bg-[#051a10]/70 p-3.5 space-y-1 cursor-pointer hover:border-[#d4af37]/50 transition-colors"
+          >
             <div className="flex items-center gap-1.5 text-[11px] font-bold text-rose-400">
               <Clock className="h-3.5 w-3.5" />
               <span>{strings.adminPendingPayouts}</span>
             </div>
             <div className="text-lg sm:text-xl font-black text-rose-300">
-              Rs. {pendingPayouts.toLocaleString()}
+              {loadedTabs.withdrawals ? `Rs. ${pendingPayouts.toLocaleString()}` : isUr ? 'ٹیب کھولیں' : 'Open Payouts'}
             </div>
           </div>
 
@@ -1382,11 +1551,15 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
               {isUr ? 'خالص فارم فنڈز' : 'Net Farm Reserve'}
             </div>
             <div className="text-lg sm:text-xl font-black text-[#d4af37]">
-              Rs. {netFarmBalance.toLocaleString()}
+              {loadedTabs.orders && loadedTabs.withdrawals
+                ? `Rs. ${netFarmBalance.toLocaleString()}`
+                : loadedTabs.orders
+                ? `Rs. ${totalApprovedDeposits.toLocaleString()}`
+                : '—'}
             </div>
           </div>
 
-          {/* REQUIREMENT 3 & 4: TOTAL USERS STATISTICS BOX WITH DRILL-DOWN ACTION */}
+          {/* TOTAL USERS STATISTICS BOX WITH LAZY DRILL-DOWN */}
           <div
             onClick={() => setActiveTab('users')}
             role="button"
@@ -1405,7 +1578,11 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
               <ChevronRight className="h-3.5 w-3.5 text-[#d4af37] group-hover:translate-x-1 transition-transform" />
             </div>
             <div className="text-lg sm:text-xl font-black text-white group-hover:text-[#f3df88] transition-colors">
-              {usersList.length} {isUr ? 'صارفین' : 'Users'}
+              {loadedTabs.users
+                ? `${usersList.length} ${isUr ? 'صارفین' : 'Users'}`
+                : isUr
+                ? 'لوڈ کریں →'
+                : 'View Users →'}
             </div>
             <div className="text-[10px] text-[#d4af37]/80 flex items-center gap-1 font-semibold">
               <span>{strings.clickToViewUsers}</span>
@@ -1861,6 +2038,75 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
             </div>
           </div>
 
+          {orderActionMessage && (
+            <div className="flex items-center justify-between gap-2 rounded-2xl border border-emerald-500/45 bg-emerald-950/75 px-4 py-3 text-xs font-bold text-emerald-200 shadow-lg">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
+                <span>{orderActionMessage}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setOrderActionMessage(null)}
+                className="text-emerald-300/70 hover:text-white cursor-pointer"
+                aria-label="Dismiss success message"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          )}
+
+          {orderActionError && (
+            <div className="flex items-center justify-between gap-2 rounded-2xl border border-rose-500/45 bg-rose-950/75 px-4 py-3 text-xs font-bold text-rose-200 shadow-lg">
+              <div className="flex items-center gap-2">
+                <AlertCircle className="h-4 w-4 shrink-0 text-rose-400" />
+                <span>{orderActionError}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setOrderActionError(null)}
+                className="text-rose-300/70 hover:text-white cursor-pointer"
+                aria-label="Dismiss error message"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          )}
+
+          {/* Status filter bar */}
+          <div className="flex flex-wrap items-center gap-2">
+            {([
+              { id: 'all', labelEn: `All (${orders.length})`, labelUr: `تمام (${orders.length})` },
+              {
+                id: 'pending',
+                labelEn: `Pending (${orders.filter((o) => o.status === 'pending').length})`,
+                labelUr: `زیرِ التواء (${orders.filter((o) => o.status === 'pending').length})`,
+              },
+              {
+                id: 'approved',
+                labelEn: `Approved (${orders.filter((o) => o.status === 'approved').length})`,
+                labelUr: `منظور شدہ (${orders.filter((o) => o.status === 'approved').length})`,
+              },
+              {
+                id: 'rejected',
+                labelEn: `Rejected (${orders.filter((o) => o.status === 'rejected').length})`,
+                labelUr: `مسترد شدہ (${orders.filter((o) => o.status === 'rejected').length})`,
+              },
+            ] as const).map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setOrderStatusFilter(tab.id)}
+                className={`rounded-xl px-3 py-1.5 text-xs font-bold border transition-all cursor-pointer ${
+                  orderStatusFilter === tab.id
+                    ? 'border-[#f3df88] bg-gradient-to-r from-[#d4af37] to-[#b38f20] text-[#051a10] shadow-md'
+                    : 'border-[#d4af37]/30 bg-[#0a2618]/80 text-[#f4efe6]/80 hover:border-[#d4af37]/60'
+                }`}
+              >
+                {isUr ? tab.labelUr : tab.labelEn}
+              </button>
+            ))}
+          </div>
+
           {orders.length === 0 ? (
             <div className="rounded-3xl border border-[#d4af37]/20 bg-[#0a2618]/60 p-8 text-center text-xs text-[#f4efe6]/50">
               {isUr ? 'کوئی آرڈر جمع نہیں ہوا (ڈیٹا بیس خالی ہے)۔' : 'No package orders submitted yet (Database starts empty).'}
@@ -1869,13 +2115,15 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
             <div className="space-y-3">
               {orders
                 .filter((ord) => {
+                  if (orderStatusFilter !== 'all' && ord.status !== orderStatusFilter) return false;
                   if (!orderTxidSearch.trim()) return true;
                   const q = orderTxidSearch.trim().toLowerCase();
                   return (
                     (ord.tid || '').toLowerCase().includes(q) ||
                     (ord.userName || '').toLowerCase().includes(q) ||
                     (ord.userEmail || '').toLowerCase().includes(q) ||
-                    (ord.userId || '').toLowerCase().includes(q)
+                    (ord.userId || '').toLowerCase().includes(q) ||
+                    String(ord.amount || '').includes(q)
                   );
                 })
                 .map((ord) => (
@@ -1895,6 +2143,11 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
                           {ord.paymentMethodTitle && (
                             <span className="rounded-lg bg-[#d4af37]/15 border border-[#d4af37]/30 px-2 py-0.5 text-[10px] font-bold text-[#f3df88]">
                               {ord.paymentMethodTitle}
+                            </span>
+                          )}
+                          {ord.shedId && (
+                            <span className="rounded-lg bg-emerald-500/15 border border-emerald-500/35 px-2 py-0.5 text-[10px] font-bold text-emerald-300">
+                              {ord.shedId}
                             </span>
                           )}
                         </div>

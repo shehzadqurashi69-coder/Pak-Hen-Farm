@@ -21,6 +21,7 @@ import {
   query,
   orderBy,
   where,
+  limit,
   Timestamp,
   Unsubscribe,
   runTransaction,
@@ -82,6 +83,11 @@ import {
   aggregateGlobalStatsFromSheds,
   getShedCrackedEggsCount,
   isPackageActive,
+  validateOrderSubmissionPayload,
+  sanitizeFirestorePayload,
+  estimateUtf8ByteLength,
+  MAX_ORDER_DOC_BYTES,
+  computeIncrementalShedAndGlobalStats,
 } from '../utils/farmRules';
 
 // --------------------------------------------------------------------------------------
@@ -163,9 +169,9 @@ export async function cloudSignIn(email: string, pass: string): Promise<UserAcco
     return snap.data() as UserAccount;
   }
 
-  // 3. Regular Member login
+  // 3. Regular Member login (bounded to 1 document)
   const usersRef = collection(db, 'users');
-  const q = query(usersRef, where('email', '==', cleanEmail));
+  const q = query(usersRef, where('email', '==', cleanEmail), limit(1));
   const querySnap = await getDocs(q);
 
   if (querySnap.empty) {
@@ -198,26 +204,25 @@ export async function cloudRegister(details: {
 
   const usersRef = collection(db, 'users');
 
-  // 1. Strict Unique Email check in Cloud Firestore
-  const emailQuery = query(usersRef, where('email', '==', cleanEmail));
+  // 1. Strict Unique Email check in Cloud Firestore (bounded to 1 read)
+  const emailQuery = query(usersRef, where('email', '==', cleanEmail), limit(1));
   const emailSnap = await getDocs(emailQuery);
   if (!emailSnap.empty) {
     throw new Error('An account with this email address already exists.');
   }
 
-  // 2. Strict Unique Phone Number check across all users
-  const allUsersSnap = await getDocs(usersRef);
-  const duplicatePhone = allUsersSnap.docs.some((docSnap) => {
-    const u = docSnap.data() as UserAccount;
-    if (!u.phone) return false;
-    const existingDigits = sanitizePhone(u.phone);
-    return (
-      u.phone.trim() === cleanPhone ||
-      (digitsPhone.length >= 10 && existingDigits.length >= 10 && (
-        existingDigits.endsWith(digitsPhone.slice(-10)) || digitsPhone.endsWith(existingDigits.slice(-10))
-      ))
+  // 2. Indexed Unique Phone Number check (2 bounded limit(1) queries — zero full-collection scan)
+  const last10 = digitsPhone.length >= 10 ? digitsPhone.slice(-10) : digitsPhone;
+  const phoneChecks = [
+    getDocs(query(usersRef, where('phone', '==', cleanPhone), limit(1))),
+  ];
+  if (last10.length >= 10) {
+    phoneChecks.push(
+      getDocs(query(usersRef, where('phoneNormalized', '==', last10), limit(1)))
     );
-  });
+  }
+  const phoneSnaps = await Promise.all(phoneChecks);
+  const duplicatePhone = phoneSnaps.some((s) => !s.empty);
 
   if (duplicatePhone) {
     throw new Error('An account with this phone number already exists.');
@@ -232,7 +237,8 @@ export async function cloudRegister(details: {
     email: cleanEmail,
     password: details.password.trim(),
     fullName: details.fullName.trim(),
-    phone: details.phone.trim(),
+    phone: cleanPhone,
+    phoneNormalized: last10,
     easypaisaTitle: epTitle,
     easypaisaNumber: epNumber,
     paymentGateway: 'easypaisa',
@@ -282,7 +288,7 @@ export async function cloudResetPassword(details: {
   }
 
   const usersRef = collection(db, 'users');
-  const q = query(usersRef, where('email', '==', cleanEmail));
+  const q = query(usersRef, where('email', '==', cleanEmail), limit(1));
   const snap = await getDocs(q);
 
   if (snap.empty) {
@@ -752,169 +758,250 @@ export async function cloudSubmitOrder(
     tid: string; // Transaction Hash / TxID
     paymentMethodId?: string;
     paymentMethodTitle?: string;
-    proofSlipUrl?: string; // Uploaded payment slip / screenshot Base64
+    proofSlipUrl?: string; // Server URL (/uploads/slips/...) or size-capped compressed JPEG data URL
+    proofSlipSizeBytes?: number;
   }
 ): Promise<HenOrder> {
   if (isUserLocked(user)) {
     throw new Error('Your account is currently suspended or banned. Purchasing packages is disabled.');
   }
 
-  const cleanTid = orderData.tid.trim();
-  const lowerTid = cleanTid.toLowerCase();
+  const hensCount = Math.floor(Number(orderData.hensCount) || 0);
+  const amount = Math.round(Number(orderData.amount) || 0);
+  const cleanTid = (orderData.tid || '').trim();
 
-  // Strict anti-duplicate check: ensure this TID has never been used for any order or medical fee
-  const ordersSnap = await getDocs(collection(db, 'orders'));
-  const isDuplicateOrder = ordersSnap.docs.some((d) => {
-    const o = d.data() as HenOrder;
-    return o.tid && o.tid.trim().toLowerCase() === lowerTid;
+  // Validate package quantity, exact price, TrxID, and slip payload bounds for ALL package sizes (1 hen to 100+ hens)
+  const validation = validateOrderSubmissionPayload({
+    hensCount,
+    amount,
+    tid: cleanTid,
+    proofSlipUrl: orderData.proofSlipUrl,
   });
-
-  if (isDuplicateOrder) {
-    throw new Error('This Transaction ID (TxID) has already been processed or submitted. Each transaction ID can only be used once.');
+  if (!validation.valid) {
+    throw new Error(validation.error || 'Invalid package order details.');
   }
 
-  const medSnap = await getDocs(collection(db, 'medicalPayments'));
-  const isDuplicateMed = medSnap.docs.some((d) => {
-    const m = d.data() as MedicalPaymentOrder;
-    return m.tid && m.tid.trim().toLowerCase() === lowerTid;
-  });
+  const lowerTid = validation.normalizedTid;
 
-  if (isDuplicateMed) {
+  // Targeted O(1) duplicate TID checks (zero full-collection scans on orders or medicalPayments)
+  const [dupNormSnap, dupExactSnap, dupMedSnap] = await Promise.all([
+    getDocs(query(collection(db, 'orders'), where('tidNormalized', '==', lowerTid), limit(1))),
+    getDocs(query(collection(db, 'orders'), where('tid', '==', cleanTid), limit(1))),
+    getDocs(query(collection(db, 'medicalPayments'), where('tid', '==', cleanTid), limit(1))),
+  ]);
+
+  if (!dupNormSnap.empty || !dupExactSnap.empty) {
+    throw new Error(
+      'This Transaction ID (TxID) has already been processed or submitted. Each transaction ID can only be used once.'
+    );
+  }
+
+  if (!dupMedSnap.empty) {
     throw new Error('This Transaction ID (TxID) has already been submitted for a medical fee payment.');
   }
 
-  const orderId = 'ORD-' + Date.now().toString(36).toUpperCase() + '-' + Math.floor(100 + Math.random() * 900);
+  const orderId =
+    'ORD-' + Date.now().toString(36).toUpperCase() + '-' + Math.floor(100 + Math.random() * 900);
   const newOrder: HenOrder = {
     id: orderId,
     userId: user.id,
-    userName: user.fullName,
-    userEmail: user.email,
-    userPhone: user.phone,
-    packageId: orderData.packageId,
-    hensCount: orderData.hensCount,
-    amount: orderData.amount,
+    userName: user.fullName || 'Investor',
+    userEmail: user.email || '',
+    userPhone: user.phone || '',
+    packageId: orderData.packageId || `partner-flock-${hensCount}-hens`,
+    hensCount,
+    amount,
     senderEasypaisaNumber: (orderData.senderEasypaisaNumber || user.phone || '').trim(),
     senderEasypaisaTitle: (orderData.senderEasypaisaTitle || user.fullName || '').trim(),
     tid: cleanTid,
+    tidNormalized: lowerTid,
     status: 'pending',
     submittedAt: new Date().toISOString(),
-    paymentMethodId: orderData.paymentMethodId,
-    paymentMethodTitle: orderData.paymentMethodTitle,
-    proofSlipUrl: orderData.proofSlipUrl,
+    paymentMethodId: orderData.paymentMethodId || '',
+    paymentMethodTitle: orderData.paymentMethodTitle || '',
+    proofSlipUrl: (orderData.proofSlipUrl || '').trim(),
+    proofSlipSizeBytes: orderData.proofSlipSizeBytes || validation.proofSlipBytes,
   };
 
-  // Push directly to cloud database
-  await setDoc(doc(db, 'orders', orderId), newOrder);
+  // Strip any undefined fields so Firestore setDoc never rejects optional keys
+  const sanitizedOrder = sanitizeFirestorePayload(newOrder);
+  const payloadBytes = estimateUtf8ByteLength(JSON.stringify(sanitizedOrder));
+  if (payloadBytes > MAX_ORDER_DOC_BYTES) {
+    throw new Error(
+      'Payment slip payload exceeds database document size limit. Please upload a smaller or cropped screenshot.'
+    );
+  }
+
+  try {
+    await setDoc(doc(db, 'orders', orderId), sanitizedOrder);
+  } catch (err: any) {
+    console.error('Firestore cloudSubmitOrder setDoc failed:', err);
+    if (err?.code === 'resource-exhausted' || err?.message?.includes('Quota limit exceeded')) {
+      throw new Error(
+        'Database daily quota limit reached. Please retry shortly or contact Farm Support with your TrxID.'
+      );
+    }
+    throw new Error(
+      err?.message?.includes('longer than') || err?.code === 'invalid-argument'
+        ? 'Payment slip image was too large for database storage. Please upload a clearer or cropped screenshot.'
+        : err?.message || 'Failed to save package order to server. Please check your connection and try again.'
+    );
+  }
+
   return newOrder;
 }
 
+export interface OrderApprovalSummary {
+  orderId: string;
+  assignedShedId: string;
+  hensCount: number;
+  amount: number;
+  updatedUser?: UserAccount;
+}
+
 /**
- * Admin approves order:
- * 1. Marks order approved
- * 2. Accumulates hens into buyer's active flock (never overwrites)
- * 3. AUTO-COMMISSION: Calculates 10% of purchased package price and instantly credits it to Inviter's wallet
+ * Optimized Admin Order Approval:
+ * Reads and updates ONLY the specific order, buyer user, and assigned shed records needed
+ * (plus incremental stats/dailyProduction) without scanning the full `users` or `orders` collections.
  */
-export async function cloudApproveOrder(order: HenOrder, adminNote?: string): Promise<void> {
-  const orderRef = doc(db, 'orders', order.id);
+export async function cloudApproveOrder(
+  orderOrId: string | HenOrder,
+  adminNote?: string
+): Promise<OrderApprovalSummary> {
+  const orderId = typeof orderOrId === 'string' ? orderOrId : orderOrId.id;
+  if (!orderId) {
+    throw new Error('Invalid order ID.');
+  }
+
+  // 1. Read ONLY the specific order document (1 read)
+  const orderRef = doc(db, 'orders', orderId);
   const orderSnap = await getDoc(orderRef);
   if (!orderSnap.exists()) {
-    throw new Error('Order not found in database');
+    throw new Error('Order not found in database.');
   }
-  const currentOrderData = orderSnap.data() as HenOrder;
-  if (currentOrderData.status !== 'pending') {
-    throw new Error(`This order is already ${currentOrderData.status}.`);
+  const currentOrder = orderSnap.data() as HenOrder;
+  if (currentOrder.status !== 'pending') {
+    throw new Error(`This order is already ${currentOrder.status}.`);
   }
 
-  // Strictly prevent multiple package approvals for a single Transaction ID (TID)
-  const cleanTid = (currentOrderData.tid || order.tid || '').trim();
-  if (cleanTid) {
-    const ordersRef = collection(db, 'orders');
-    const tidQuery = query(
-      ordersRef,
-      where('tid', '==', cleanTid),
-      where('status', '==', 'approved')
+  const cleanTid = (currentOrder.tid || '').trim();
+  const userRef = doc(db, 'users', currentOrder.userId);
+
+  // 2. Targeted reads only: duplicate-approved TID check (limit 1), specific buyer user doc (1 read),
+  //    and the 5 fixed shed docs (Shed-101..Shed-105) by direct document ID (zero collection scans!)
+  const [approvedTidSnap, userSnap, ...shedDocSnaps] = await Promise.all([
+    cleanTid
+      ? getDocs(
+          query(
+            collection(db, 'orders'),
+            where('tid', '==', cleanTid),
+            where('status', '==', 'approved'),
+            limit(1)
+          )
+        )
+      : Promise.resolve(null),
+    getDoc(userRef),
+    ...INITIAL_SHEDS.map((s) => getDoc(doc(db, 'sheds', s.id))),
+  ]);
+
+  if (approvedTidSnap && !approvedTidSnap.empty) {
+    throw new Error(
+      `Transaction ID "${cleanTid}" has already been approved for another package. Double approval blocked.`
     );
-    const approvedTidSnap = await getDocs(tidQuery);
-    if (!approvedTidSnap.empty) {
-      throw new Error(`Transaction ID "${cleanTid}" has already been approved for another package. Double approval blocked.`);
-    }
   }
 
-  const userRef = doc(db, 'users', order.userId);
-
-  const now = new Date();
-  const expiresAt = new Date(now.getTime() + PACKAGE_VALIDITY_DAYS * 24 * 60 * 60 * 1000).toISOString();
-
-  // Retrieve current sheds to assign hens to an available shed (always covering Shed-101 to Shed-105)
-  const shedsSnap = await getDocs(collection(db, 'sheds'));
   const rawSheds: FarmShed[] = [];
-  if (shedsSnap.empty) {
-    for (const s of INITIAL_SHEDS) {
-      await setDoc(doc(db, 'sheds', s.id), s);
+  shedDocSnaps.forEach((snap) => {
+    if (snap.exists()) {
+      rawSheds.push(snap.data() as FarmShed);
     }
-  } else {
-    shedsSnap.forEach((d) => rawSheds.push(d.data() as FarmShed));
-  }
+  });
   const currentSheds = mergeAllSheds(rawSheds);
 
-  const assignedShedId = assignAvailableShed(currentSheds, order.hensCount);
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const expiresAt = new Date(
+    now.getTime() + PACKAGE_VALIDITY_DAYS * 24 * 60 * 60 * 1000
+  ).toISOString();
+
+  const assignedShedId = assignAvailableShed(currentSheds, currentOrder.hensCount);
+
+  // Compute incremental updates for ONLY the assigned shed and global stats in memory (no full users scan!)
+  const { updatedShed, updatedGlobalStats } = computeIncrementalShedAndGlobalStats(
+    currentSheds,
+    assignedShedId,
+    currentOrder.hensCount,
+    nowIso
+  );
 
   const newPkg: PurchasedPackage = {
     id: 'PKG-' + Date.now(),
-    packageId: order.packageId,
-    hens: order.hensCount,
-    purchasePrice: order.amount,
-    purchasedAt: order.submittedAt,
-    approvedAt: now.toISOString(),
-    expiresAt: expiresAt,
-    tid: order.tid,
+    packageId: currentOrder.packageId,
+    hens: currentOrder.hensCount,
+    purchasePrice: currentOrder.amount,
+    purchasedAt: currentOrder.submittedAt,
+    approvedAt: nowIso,
+    expiresAt,
+    tid: currentOrder.tid,
     active: true,
     shedId: assignedShedId,
   };
 
-  // Update assigned shed capacity safely (setDoc merge ensures Shed-101..105 docs always exist)
-  const targetShedRef = doc(db, 'sheds', assignedShedId);
-  const targetShedDoc = currentSheds.find((s) => s.id === assignedShedId) || INITIAL_SHEDS[0];
-  const existingShedHens = targetShedDoc ? targetShedDoc.totalHens : 0;
-  await setDoc(
-    targetShedRef,
-    {
-      ...targetShedDoc,
-      totalHens: existingShedHens + order.hensCount,
-      lastUpdated: now.toISOString(),
-    },
-    { merge: true }
-  );
+  let inviterReferralCode: string | undefined;
+  let updatedBuyerUser: UserAccount | undefined;
 
-  // 1. Update Order in Firestore with commission mark and assigned shed
-  await updateDoc(orderRef, {
+  // 3. Commit ONLY the specific order, buyer user, assigned shed, and global stats atomically via writeBatch
+  const batch = writeBatch(db);
+
+  batch.update(orderRef, {
     status: 'approved',
-    reviewedAt: now.toISOString(),
+    reviewedAt: nowIso,
     adminNote: adminNote || 'Verified and approved on cloud',
     shedId: assignedShedId,
   });
 
-  // 2. Accumulate user's active hens in Firestore & read inviter referral code
-  const userSnap = await getDoc(userRef);
-  let inviterReferralCode: string | undefined;
   if (userSnap.exists()) {
-    const current = userSnap.data() as UserAccount;
-    const currentHens = current.activeHens || 0;
-    const existingPackages = current.packages || [];
-    inviterReferralCode = current.referredBy;
+    const currentBuyer = userSnap.data() as UserAccount;
+    const currentHens = Number(currentBuyer.activeHens) || 0;
+    const existingPackages = Array.isArray(currentBuyer.packages) ? currentBuyer.packages : [];
+    const nextPackages = [...existingPackages, newPkg];
+    const nextHens = currentHens + currentOrder.hensCount;
+    inviterReferralCode = currentBuyer.referredBy;
+    updatedBuyerUser = {
+      ...currentBuyer,
+      activeHens: nextHens,
+      packages: nextPackages,
+    };
 
-    await updateDoc(userRef, {
-      activeHens: currentHens + order.hensCount,
-      packages: [...existingPackages, newPkg],
+    batch.update(userRef, {
+      activeHens: nextHens,
+      packages: nextPackages,
     });
   }
 
-  // 3. Direct Referral Commission (10% base, or 15% when Target C/D unlocked) & Milestone Target Bonus Crediting:
+  batch.set(
+    doc(db, 'sheds', assignedShedId),
+    sanitizeFirestorePayload(updatedShed),
+    { merge: true }
+  );
+
+  batch.set(
+    doc(db, 'stats', 'dailyProduction'),
+    sanitizeFirestorePayload(updatedGlobalStats),
+    { merge: true }
+  );
+
+  await batch.commit();
+
+  // 4. Direct Referral Commission (10% base, or 15% when Target C/D unlocked) & Milestone Target Bonus:
+  //    Only executes when buyer was referred, using scoped equality queries (no full collection scan).
   if (inviterReferralCode && inviterReferralCode.trim()) {
     try {
+      const cleanRefCode = inviterReferralCode.trim();
       const usersRef = collection(db, 'users');
-      const inviterQuery = query(usersRef, where('referralCode', '==', inviterReferralCode.trim()));
-      const inviterSnap = await getDocs(inviterQuery);
+      const inviterSnap = await getDocs(
+        query(usersRef, where('referralCode', '==', cleanRefCode), limit(1))
+      );
 
       if (!inviterSnap.empty) {
         const inviterDoc = inviterSnap.docs[0];
@@ -924,17 +1011,14 @@ export async function cloudApproveOrder(order: HenOrder, adminNote?: string): Pr
           ? inviterData.claimedMilestoneTargets
           : [];
 
-        // Apply 10% base rate or 15% if Target C / Target D was already unlocked
         const commissionRate = getReferralCommissionRateForPackage(
-          order.amount,
-          order.hensCount,
+          currentOrder.amount,
+          currentOrder.hensCount,
           prevClaimed
         );
-        const commissionAmount = calculateReferralCommission(order.amount, commissionRate);
+        const commissionAmount = calculateReferralCommission(currentOrder.amount, commissionRate);
 
-        // Fetch all referrals for this inviter to evaluate Milestone Targets A, B, C, D
-        const refsQuery = query(usersRef, where('referredBy', '==', inviterReferralCode.trim()));
-        const refsSnap = await getDocs(refsQuery);
+        const refsSnap = await getDocs(query(usersRef, where('referredBy', '==', cleanRefCode)));
         const allReferrals: UserAccount[] = [];
         refsSnap.forEach((d) => {
           allReferrals.push(d.data() as UserAccount);
@@ -955,9 +1039,10 @@ export async function cloudApproveOrder(order: HenOrder, adminNote?: string): Pr
           });
         }
 
-        // Notify inviter in Farm Inbox when a Milestone Target Bonus unlocks
         if (milestoneEval.newlyUnlockedTargets.length > 0) {
-          const unlockedNames = milestoneEval.newlyUnlockedTargets.map((t) => t.titleEn).join(', ');
+          const unlockedNames = milestoneEval.newlyUnlockedTargets
+            .map((t) => t.titleEn)
+            .join(', ');
           const alertId = `ALT-MS-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`;
           await setDoc(doc(db, 'alerts', alertId), {
             id: alertId,
@@ -979,12 +1064,13 @@ export async function cloudApproveOrder(order: HenOrder, adminNote?: string): Pr
     }
   }
 
-  // 4. Sync nationwide Global Farm Production Stats across all 5 sheds (Shed-101..105)
-  try {
-    await cloudSyncGlobalStatsFromSheds();
-  } catch (syncErr) {
-    console.warn('Non-blocking global stats sync after order approval:', syncErr);
-  }
+  return {
+    orderId,
+    assignedShedId,
+    hensCount: currentOrder.hensCount,
+    amount: currentOrder.amount,
+    updatedUser: updatedBuyerUser,
+  };
 }
 
 /**
@@ -1239,8 +1325,8 @@ export async function cloudCollectEggs(user: UserAccount): Promise<{ record: Egg
     throw new Error('All packages have completed their 90-day validity window and are expired. Daily egg production has stopped. Please renew or buy a new package to resume.');
   }
 
-  // 2. Check if user has any unpaid medical fees
-  const alertsSnap = await getDocs(query(collection(db, 'alerts'), where('userId', '==', user.id)));
+  // 2. Check if user has any unpaid medical fees (bounded to 30 alerts)
+  const alertsSnap = await getDocs(query(collection(db, 'alerts'), where('userId', '==', user.id), limit(30)));
   const userAlerts: UserAlert[] = [];
   alertsSnap.forEach((d) => userAlerts.push(d.data() as UserAlert));
   if (hasUnpaidMedicalFee(userAlerts)) {
@@ -1256,13 +1342,17 @@ export async function cloudCollectEggs(user: UserAccount): Promise<{ record: Egg
   const cycleDates = catchUp.cycleDates.length > 0 ? catchUp.cycleDates : [now];
 
   // 3. Strict 1:1 Egg Yield Math & Multi-Shed Proportional Financial Loss Calculation:
-  // Read all sheds (Shed-101 to Shed-105) independently so multi-shed investors and single-shed
-  // investors get exact proportional deductions based strictly on their active hens in each shed.
+  // Read ONLY the specific shed docs where this user holds active hens (typically 1 doc read!).
   let mergedSheds: FarmShed[] = INITIAL_SHEDS;
   try {
-    const allShedsSnap = await getDocs(collection(db, 'sheds'));
+    const userShedMap = getUserActiveHensByShed(userWithSyncedExpiry, now);
+    const activeShedIds = Object.keys(userShedMap).filter((sid) => (userShedMap[sid] || 0) > 0);
+    const idsToRead = activeShedIds.length > 0 ? activeShedIds : ['Shed-101'];
+    const shedSnaps = await Promise.all(idsToRead.map((sid) => getDoc(doc(db, 'sheds', sid))));
     const rawSheds: FarmShed[] = [];
-    allShedsSnap.forEach((d) => rawSheds.push(d.data() as FarmShed));
+    shedSnaps.forEach((d) => {
+      if (d.exists()) rawSheds.push(d.data() as FarmShed);
+    });
     mergedSheds = mergeAllSheds(rawSheds);
   } catch (shedErr) {
     console.warn('Could not read sheds data for multi-shed proportional loss calculation:', shedErr);
@@ -1350,9 +1440,9 @@ export async function cloudSetUserStatus(
   );
 }
 
-export async function cloudGetCollections(userId: string): Promise<EggCollectionRecord[]> {
+export async function cloudGetCollections(userId: string, limitCount = 60): Promise<EggCollectionRecord[]> {
   const colsRef = collection(db, 'collections');
-  const q = query(colsRef, where('userId', '==', userId));
+  const q = query(colsRef, where('userId', '==', userId), limit(limitCount));
   const snap = await getDocs(q);
   const records: EggCollectionRecord[] = [];
   snap.forEach((d) => records.push(d.data() as EggCollectionRecord));
@@ -1369,33 +1459,16 @@ export async function cloudUpdateStats(stats: { totalCollected: number; cracked:
     lastUpdated: new Date().toISOString(),
   };
   await setDoc(statsRef, data, { merge: true });
-  const snap = await getDoc(statsRef);
-  return snap.exists() ? (snap.data() as GlobalFarmStats) : data;
+  return data;
 }
 
 /**
  * Aggregates live production, flock sizes (25,000 capacity), cracked eggs, net fresh eggs,
- * and mortality across all 5 sheds (Shed-101 to Shed-105) and persists to stats/dailyProduction.
+ * and mortality across ONLY the 5 fixed shed documents (Shed-101 to Shed-105) — 5 reads total,
+ * zero full users-collection scan — and persists to stats/dailyProduction.
  */
 export async function cloudSyncGlobalStatsFromSheds(): Promise<GlobalFarmStats> {
-  const now = new Date();
-  const [shedsSnap, usersSnap] = await Promise.all([
-    getDocs(collection(db, 'sheds')),
-    getDocs(collection(db, 'users')),
-  ]);
-
-  const rawSheds: FarmShed[] = [];
-  shedsSnap.forEach((d) => rawSheds.push(d.data() as FarmShed));
-
-  const allUsers: UserAccount[] = [];
-  usersSnap.forEach((d) => allUsers.push(d.data() as UserAccount));
-
-  const shedHensSum: Record<string, number> = {};
-  for (const s of INITIAL_SHEDS) {
-    shedHensSum[s.id] = calculateShedDynamicSum(s.id, allUsers, now);
-  }
-
-  const mergedSheds = mergeAllSheds(rawSheds, shedHensSum);
+  const mergedSheds = await cloudGetSheds();
   const aggregated = aggregateGlobalStatsFromSheds(mergedSheds);
   await setDoc(doc(db, 'stats', 'dailyProduction'), aggregated, { merge: true });
   return aggregated;
@@ -1475,61 +1548,16 @@ export async function cloudToggleTicketRead(ticketId: string, read: boolean): Pr
 
 export function subscribeToSheds(callback: (sheds: FarmShed[]) => void): Unsubscribe {
   const shedsRef = collection(db, 'sheds');
-  const usersRef = collection(db, 'users');
-
-  // Helper function: calculates dynamic SUM of all 90-day-active hens per shed (Shed-101 to Shed-105)
-  const computeDynamicSheds = async (shedDocs: FarmShed[]): Promise<FarmShed[]> => {
-    const now = new Date();
-    const usersSnap = await getDocs(usersRef);
-    const allUsers: UserAccount[] = [];
-    usersSnap.forEach((uDoc) => allUsers.push(uDoc.data() as UserAccount));
-
-    const shedHensSum: Record<string, number> = {};
-    for (const s of INITIAL_SHEDS) {
-      shedHensSum[s.id] = calculateShedDynamicSum(s.id, allUsers, now);
-    }
-
-    // Merge all 5 canonical sheds (Shed-101 .. Shed-105) so every shed is tracked independently
-    const computedList = mergeAllSheds(shedDocs, shedHensSum);
-
-    // Persist missing sheds or updated dynamic totals in Firestore
-    for (const cShed of computedList) {
-      try {
-        const sRef = doc(db, 'sheds', cShed.id);
-        const sSnap = await getDoc(sRef);
-        if (!sSnap.exists()) {
-          await setDoc(sRef, cShed);
-        } else {
-          const existingData = sSnap.data() as FarmShed;
-          if (
-            existingData.totalHens !== cShed.totalHens ||
-            existingData.netFreshEggs !== cShed.netFreshEggs
-          ) {
-            await updateDoc(sRef, {
-              totalHens: cShed.totalHens,
-              netFreshEggs: cShed.netFreshEggs ?? Math.max(0, (existingData.dailyEggCollection ?? cShed.totalHens) - getShedCrackedEggsCount({ ...existingData, totalHens: cShed.totalHens })),
-              lastUpdated: new Date().toISOString(),
-            });
-          }
-        }
-      } catch (err) {
-        console.warn('Persisting dynamic shed SUM warning:', err);
-      }
-    }
-
-    return computedList;
-  };
-
+  // Lightweight listener with ZERO users-collection scan and ZERO write-back loop.
   return onSnapshot(
     shedsRef,
-    async (snap) => {
+    (snap) => {
       try {
         const rawSheds: FarmShed[] = [];
         snap.forEach((d) => rawSheds.push(d.data() as FarmShed));
-        const computedSheds = await computeDynamicSheds(rawSheds);
-        callback(computedSheds);
+        callback(mergeAllSheds(rawSheds));
       } catch (err) {
-        console.warn('subscribeToSheds computation warning:', err);
+        console.warn('subscribeToSheds merge warning:', err);
         callback(INITIAL_SHEDS);
       }
     },
@@ -1620,7 +1648,17 @@ export async function cloudApplyShedMortality(
   // 4. Calculate Loss Per Hen: (Total Financial Loss / Total Active Hens in THIS Shed)
   const lossPerHen = totalFinancialLoss / currentTotal;
 
-  // 5. Calculate each investor's proportional loss strictly from their active hens in THIS shed
+  // 5. Batch-commit each investor's proportional loss strictly from their active hens in THIS shed
+  let batch = writeBatch(db);
+  let batchOps = 0;
+  const commitBatchIfNeeded = async (force = false) => {
+    if ((force && batchOps > 0) || batchOps >= 400) {
+      await batch.commit();
+      batch = writeBatch(db);
+      batchOps = 0;
+    }
+  };
+
   for (const userDoc of usersSnap.docs) {
     const userData = userDoc.data() as UserAccount;
     const hensByShed = getUserActiveHensByShed(userData, now);
@@ -1635,9 +1673,10 @@ export async function cloudApplyShedMortality(
         const currentBalance = Number(userData.walletBalance) || 0;
         const newWalletBalance = currentBalance - userProportionalLoss;
 
-        await updateDoc(userDoc.ref, {
+        batch.update(userDoc.ref, {
           walletBalance: newWalletBalance,
         });
+        batchOps += 1;
 
         const alertId = 'ALERT-MORT-' + shedId + '-' + userData.id + '-' + Date.now();
         const alertDoc: UserAlert = {
@@ -1659,10 +1698,13 @@ export async function cloudApplyShedMortality(
           createdAt: now.toISOString(),
           read: false,
         };
-        await setDoc(doc(db, 'alerts', alertId), alertDoc);
+        batch.set(doc(db, 'alerts', alertId), alertDoc);
+        batchOps += 1;
+        await commitBatchIfNeeded(false);
       }
     }
   }
+  await commitBatchIfNeeded(true);
 
   // Update ONLY this shed doc: record daily and cumulative mortality count, keeping flock active
   await setDoc(
@@ -1686,8 +1728,8 @@ export async function cloudApplyShedMortality(
 
 /**
  * Updates daily egg collection and cracked/damaged eggs count for a single shed (Shed-101 to Shed-105)
- * independently, computes netFreshEggs and crackedEggRate using the shed's real active hen count,
- * and syncs Global Farm Production Stats across all 5 sheds.
+ * independently (1 shed read, 0 users scan!), computes netFreshEggs and crackedEggRate,
+ * and syncs Global Farm Production Stats across the 5 shed docs.
  */
 export async function cloudUpdateShedDailyLog(
   shedId: string,
@@ -1700,13 +1742,9 @@ export async function cloudUpdateShedDailyLog(
     baseShed = { ...baseShed, ...(shedSnap.data() as FarmShed) };
   }
 
-  // Compute live 90-day-active hens for this shed so rate/loss uses authentic hen count
+  // Use the incrementally maintained active hen count on this shed doc (0 users-collection scans)
   const now = new Date();
-  const usersSnap = await getDocs(collection(db, 'users'));
-  const allUsers: UserAccount[] = [];
-  usersSnap.forEach((d) => allUsers.push(d.data() as UserAccount));
-  const liveHensInShed = calculateShedDynamicSum(shedId, allUsers, now);
-  const shedHens = Math.max(liveHensInShed, baseShed.totalHens || 0);
+  const shedHens = Math.max(0, Number(baseShed.totalHens) || 0);
 
   const cleanCracked = Math.max(0, Math.floor(Number(log.crackedEggsCount) || 0));
   const cleanDailyCollection =
@@ -1880,12 +1918,12 @@ export async function cloudSubmitMedicalPaymentTid(params: {
   if (!cleanTid) throw new Error('Transaction ID is required');
   const lowerTid = cleanTid.toLowerCase();
 
-  // Enforce absolute uniqueness on medical payment TID
-  const medSnap = await getDocs(collection(db, 'medicalPayments'));
-  const isDuplicateMed = medSnap.docs.some((d) => {
-    const m = d.data() as MedicalPaymentOrder;
-    return m.tid && m.tid.trim().toLowerCase() === lowerTid;
-  });
+  // Indexed uniqueness check on medical payment TID (2 bounded limit(1) queries — zero collection scan)
+  const [medNormSnap, medExactSnap] = await Promise.all([
+    getDocs(query(collection(db, 'medicalPayments'), where('tidNormalized', '==', lowerTid), limit(1))),
+    getDocs(query(collection(db, 'medicalPayments'), where('tid', '==', cleanTid), limit(1))),
+  ]);
+  const isDuplicateMed = !medNormSnap.empty || !medExactSnap.empty;
 
   if (isDuplicateMed) {
     throw new Error('This Transaction ID (TID) has already been submitted for medical verification.');
@@ -1913,7 +1951,7 @@ export async function cloudSubmitMedicalPaymentTid(params: {
     submittedAt: now,
   };
 
-  await setDoc(doc(db, 'medicalPayments', id), order);
+  await setDoc(doc(db, 'medicalPayments', id), { ...order, tidNormalized: lowerTid });
 
   // Update alert status with pending TID flag
   if (params.alertId) {
@@ -2259,5 +2297,270 @@ export async function cloudLikeGalleryItem(id: string): Promise<void> {
     updatedAt: new Date().toISOString(),
   }, { merge: true });
 }
+
+// ======================================================================================
+// PART 2: BOUNDED ONE-TIME FETCHERS (FREE-TIER READ OPTIMIZATION)
+// Replaces unnecessary continuous onSnapshot listeners & unscoped full-collection scans.
+// ======================================================================================
+
+export async function cloudGetGlobalStats(): Promise<GlobalFarmStats> {
+  const statsRef = doc(db, 'stats', 'dailyProduction');
+  const snap = await getDoc(statsRef);
+  if (snap.exists()) {
+    return snap.data() as GlobalFarmStats;
+  }
+  return {
+    totalCollected: 0,
+    cracked: 0,
+    netFresh: 0,
+    lastUpdated: new Date().toISOString(),
+  };
+}
+
+export async function cloudGetSheds(): Promise<FarmShed[]> {
+  // Read strictly the 5 fixed shed documents (Shed-101 to Shed-105) — 5 reads, zero user scans
+  const snaps = await Promise.all(
+    INITIAL_SHEDS.map((s) => getDoc(doc(db, 'sheds', s.id)))
+  );
+  const rawSheds: FarmShed[] = [];
+  snaps.forEach((snap) => {
+    if (snap.exists()) rawSheds.push(snap.data() as FarmShed);
+  });
+  return mergeAllSheds(rawSheds);
+}
+
+export async function cloudGetPaymentMethods(): Promise<PaymentAccount[]> {
+  const snap = await getDocs(query(collection(db, 'paymentMethods'), limit(20)));
+  const list: PaymentAccount[] = [];
+  snap.forEach((d) => {
+    if (d.id !== 'settings' && d.id !== 'customGreeting') {
+      const data = d.data() as PaymentAccount;
+      if (data.title && data.accountNumber) {
+        const normalizedActive = isPaymentAccountActive(data);
+        list.push({
+          ...data,
+          id: data.id || d.id,
+          active: normalizedActive,
+          isActive: normalizedActive,
+          status: normalizedActive ? 'active' : 'disabled',
+        });
+      }
+    }
+  });
+  list.sort((a, b) => (a.displayOrder || 0) - (b.displayOrder || 0));
+  return list;
+}
+
+export async function cloudGetPaymentSettings(): Promise<PaymentSettings> {
+  const snap = await getDoc(doc(db, 'paymentSettings', 'global'));
+  if (snap.exists()) {
+    return snap.data() as PaymentSettings;
+  }
+  return {
+    customGreeting: 'Thanks for trusting us! We look forward to serving your flock.',
+    customGreetingUr: 'ہم پر اعتماد کرنے کا شکریہ! ہم آپ کے فلاک کی دیکھ بھال کے منتظر ہیں۔',
+  };
+}
+
+export async function cloudGetFarmProfile(): Promise<FarmProfileSettings> {
+  const snap = await getDoc(doc(db, 'settings', 'farm_profile'));
+  if (snap.exists()) {
+    return {
+      ...DEFAULT_FARM_PROFILE,
+      ...(snap.data() as FarmProfileSettings),
+    };
+  }
+  try {
+    return {
+      farmName: localStorage.getItem('adminFarmName') || DEFAULT_FARM_PROFILE.farmName,
+      farmBio: localStorage.getItem('adminBio') || DEFAULT_FARM_PROFILE.farmBio,
+      location:
+        localStorage.getItem('adminLocation') !== null
+          ? localStorage.getItem('adminLocation') || ''
+          : DEFAULT_FARM_PROFILE.location,
+      helpline: localStorage.getItem('adminHelpline') || DEFAULT_FARM_PROFILE.helpline,
+      avatar: localStorage.getItem('adminAvatar') || DEFAULT_FARM_PROFILE.avatar,
+      coverUrl: localStorage.getItem('adminCover') || DEFAULT_FARM_PROFILE.coverUrl,
+      updatedAt: new Date().toISOString(),
+    };
+  } catch {
+    return DEFAULT_FARM_PROFILE;
+  }
+}
+
+export async function cloudGetBanners(): Promise<FarmBanner[]> {
+  const snap = await getDoc(doc(db, 'settings', 'ads_banners'));
+  if (snap.exists() && Array.isArray(snap.data()?.banners)) {
+    return snap.data().banners as FarmBanner[];
+  }
+  return DEFAULT_BANNERS;
+}
+
+export async function cloudGetGallery(): Promise<FarmGalleryItem[]> {
+  const snap = await getDoc(doc(db, 'settings', 'farm_gallery'));
+  if (snap.exists() && Array.isArray(snap.data()?.items)) {
+    const rawItems = snap.data().items as FarmGalleryItem[];
+    return rawItems.map((item) => ({
+      ...item,
+      location: item.location
+        ? item.location.replace(/,?\s*Sargodha,?\s*(Punjab)?/gi, '').replace(/\(\s*\)/g, '').trim() || 'Pak Hen Farm (Facility)'
+        : 'Pak Hen Farm (Facility)',
+    }));
+  }
+  return DEFAULT_GALLERY_ITEMS;
+}
+
+export async function cloudGetUserAlerts(userId: string, limitCount = 50): Promise<UserAlert[]> {
+  const snap = await getDocs(
+    query(collection(db, 'alerts'), where('userId', '==', userId), limit(limitCount))
+  );
+  const alerts: UserAlert[] = [];
+  snap.forEach((d) => alerts.push(d.data() as UserAlert));
+  alerts.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  return alerts;
+}
+
+export async function cloudGetMyReferrals(referralCode: string, limitCount = 100): Promise<UserAccount[]> {
+  const cleanCode = (referralCode || '').trim();
+  if (!cleanCode) return [];
+  const snap = await getDocs(
+    query(collection(db, 'users'), where('referredBy', '==', cleanCode), limit(limitCount))
+  );
+  const list: UserAccount[] = [];
+  snap.forEach((d) => list.push(d.data() as UserAccount));
+  list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  return list;
+}
+
+export async function cloudGetUserOrders(userId: string, limitCount = 50): Promise<HenOrder[]> {
+  const snap = await getDocs(
+    query(collection(db, 'orders'), where('userId', '==', userId), limit(limitCount))
+  );
+  const list: HenOrder[] = [];
+  snap.forEach((d) => list.push(d.data() as HenOrder));
+  list.sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());
+  return list;
+}
+
+export async function cloudGetAdminOrders(limitCount = 100): Promise<HenOrder[]> {
+  const ordersRef = collection(db, 'orders');
+  let snap;
+  try {
+    snap = await getDocs(query(ordersRef, orderBy('submittedAt', 'desc'), limit(limitCount)));
+  } catch {
+    snap = await getDocs(query(ordersRef, limit(limitCount)));
+  }
+  const list: HenOrder[] = [];
+  snap.forEach((d) => list.push(d.data() as HenOrder));
+  list.sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());
+  return list;
+}
+
+export async function cloudGetUserWithdrawals(userId: string, limitCount = 50): Promise<WithdrawalRequest[]> {
+  const snap = await getDocs(
+    query(collection(db, 'withdrawals'), where('userId', '==', userId), limit(limitCount))
+  );
+  const list: WithdrawalRequest[] = [];
+  snap.forEach((d) => list.push(d.data() as WithdrawalRequest));
+  list.sort((a, b) => new Date(b.requestedAt).getTime() - new Date(a.requestedAt).getTime());
+  return list;
+}
+
+export async function cloudGetAdminWithdrawals(limitCount = 100): Promise<WithdrawalRequest[]> {
+  const wRef = collection(db, 'withdrawals');
+  let snap;
+  try {
+    snap = await getDocs(query(wRef, orderBy('requestedAt', 'desc'), limit(limitCount)));
+  } catch {
+    snap = await getDocs(query(wRef, limit(limitCount)));
+  }
+  const list: WithdrawalRequest[] = [];
+  snap.forEach((d) => list.push(d.data() as WithdrawalRequest));
+  list.sort((a, b) => new Date(b.requestedAt).getTime() - new Date(a.requestedAt).getTime());
+  return list;
+}
+
+export async function cloudGetAdminUsers(limitCount = 150): Promise<UserAccount[]> {
+  const usersRef = collection(db, 'users');
+  let snap;
+  try {
+    snap = await getDocs(query(usersRef, orderBy('createdAt', 'desc'), limit(limitCount)));
+  } catch {
+    snap = await getDocs(query(usersRef, limit(limitCount)));
+  }
+  const rawUsers: UserAccount[] = [];
+  snap.forEach((d) => rawUsers.push(d.data() as UserAccount));
+  const realUsers = rawUsers.filter(
+    (u) =>
+      u.email &&
+      !u.email.toLowerCase().includes('ai-studio-dummy') &&
+      !u.email.toLowerCase().includes('dummy') &&
+      !u.email.toLowerCase().includes('testmember99@')
+  );
+  realUsers.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  return realUsers;
+}
+
+export async function cloudGetUserTickets(userId: string, limitCount = 50): Promise<SupportTicket[]> {
+  const snap = await getDocs(
+    query(collection(db, 'tickets'), where('userId', '==', userId), limit(limitCount))
+  );
+  const list: SupportTicket[] = [];
+  snap.forEach((d) => {
+    const ticket = d.data() as SupportTicket;
+    list.push({
+      ...ticket,
+      read: typeof ticket.read === 'boolean' ? ticket.read : ticket.status === 'resolved',
+    });
+  });
+  list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  return list;
+}
+
+export async function cloudGetAdminTickets(limitCount = 100): Promise<SupportTicket[]> {
+  const ticketsRef = collection(db, 'tickets');
+  let snap;
+  try {
+    snap = await getDocs(query(ticketsRef, orderBy('createdAt', 'desc'), limit(limitCount)));
+  } catch {
+    snap = await getDocs(query(ticketsRef, limit(limitCount)));
+  }
+  let localSOS: any[] = [];
+  try {
+    const raw = localStorage.getItem('adminSOSInbox');
+    if (raw) localSOS = JSON.parse(raw);
+  } catch {
+    // ignore
+  }
+  const list: SupportTicket[] = [];
+  snap.forEach((d) => {
+    const ticket = d.data() as SupportTicket;
+    const localMatch = localSOS.find((item) => item.id === ticket.id);
+    const isRead =
+      typeof ticket.read === 'boolean'
+        ? ticket.read
+        : localMatch
+        ? !!localMatch.read
+        : ticket.status === 'resolved';
+    list.push({ ...ticket, read: isRead });
+  });
+  list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  return list;
+}
+
+export async function cloudGetAdminMedicalPayments(limitCount = 100): Promise<MedicalPaymentOrder[]> {
+  const medRef = collection(db, 'medicalPayments');
+  let snap;
+  try {
+    snap = await getDocs(query(medRef, orderBy('submittedAt', 'desc'), limit(limitCount)));
+  } catch {
+    snap = await getDocs(query(medRef, limit(limitCount)));
+  }
+  const list: MedicalPaymentOrder[] = [];
+  snap.forEach((d) => list.push(d.data() as MedicalPaymentOrder));
+  list.sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());
+  return list;
+}
+
 
 

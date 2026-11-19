@@ -1,7 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { UserAccount, UserAlert, PaymentAccount } from '../types/farm';
 import { calculateMedicalFee, filterActivePaymentMethods } from '../utils/farmRules';
-import { apiPayMedicalFee, apiSubmitMedicalPaymentTid, subscribeToPaymentMethods } from '../services/api';
+import {
+  apiPayMedicalFee,
+  apiSubmitMedicalPaymentTid,
+  apiGetPaymentMethods,
+  getFriendlyErrorMessage,
+} from '../services/api';
 import { PaymentLogo } from './PaymentLogos';
 import { t } from '../utils/translations';
 import {
@@ -43,17 +48,25 @@ export const MedicalPaymentModal: React.FC<MedicalPaymentModalProps> = ({
 
   useEffect(() => {
     if (!isOpen) return;
-    const unsub = subscribeToPaymentMethods((methods) => {
-      const filtered = filterActivePaymentMethods(methods);
-      setActiveAccounts(filtered);
-      setSelectedTab((prev) => {
-        if (prev === 'wallet') return 'wallet';
-        if (filtered.some((a) => a.id === prev)) return prev;
-        return 'wallet';
+    let cancelled = false;
+    apiGetPaymentMethods(false)
+      .then((methods) => {
+        if (cancelled) return;
+        const filtered = filterActivePaymentMethods(methods);
+        setActiveAccounts(filtered);
+        setSelectedTab((prev) => {
+          if (prev === 'wallet') return 'wallet';
+          if (filtered.some((a) => a.id === prev)) return prev;
+          return 'wallet';
+        });
+      })
+      .catch((err) => {
+        if (!cancelled) setErrorMsg(getFriendlyErrorMessage(err, language));
       });
-    });
-    return () => unsub();
-  }, [isOpen]);
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, language]);
 
   if (!isOpen) return null;
 
@@ -93,7 +106,7 @@ export const MedicalPaymentModal: React.FC<MedicalPaymentModalProps> = ({
         onClose();
       }, 1500);
     } catch (err: any) {
-      setErrorMsg(err.message || 'Payment failed');
+      setErrorMsg(getFriendlyErrorMessage(err, language));
     } finally {
       setIsSubmitting(false);
     }
@@ -139,7 +152,7 @@ export const MedicalPaymentModal: React.FC<MedicalPaymentModalProps> = ({
         onClose();
       }, 2000);
     } catch (err: any) {
-      setErrorMsg(err.message || 'Submission failed');
+      setErrorMsg(getFriendlyErrorMessage(err, language));
     } finally {
       setIsSubmitting(false);
     }

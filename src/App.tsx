@@ -1,10 +1,23 @@
 /**
  * Pak Hen Farm - Main Application Root
- * Strictly production-ready, no mock data, permanent state persistence.
+ * Optimized for Firebase Free Tier:
+ * - Zero Firestore listeners before sign-in
+ * - Single targeted user doc listener for active investors (no collection scans inside callbacks)
+ * - Short-lived cached one-time fetches for banners, stats, farm profile, alerts, collections, and lazy gallery
+ * - Admin/Staff sessions skip investor-only reads completely
+ * - Preserves auth session on temporary Firestore quota/network errors
  */
 
-import React, { useState, useEffect } from 'react';
-import { UserAccount, EggCollectionRecord, GlobalFarmStats, UserAlert, FarmBanner, FarmGalleryItem, FarmProfileSettings } from './types/farm';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import {
+  UserAccount,
+  EggCollectionRecord,
+  GlobalFarmStats,
+  UserAlert,
+  FarmBanner,
+  FarmGalleryItem,
+  FarmProfileSettings,
+} from './types/farm';
 import { DEFAULT_BANNERS, DEFAULT_GALLERY_ITEMS, DEFAULT_FARM_PROFILE } from './utils/farmRules';
 import {
   getCurrentUser,
@@ -13,17 +26,18 @@ import {
   setLanguagePreference,
 } from './services/storage';
 import {
-  apiSyncUser,
+  apiGetUserById,
   apiGetCollections,
   apiGetStats,
-  subscribeToUserDoc,
-  subscribeToGlobalStats,
-  subscribeToUserAlerts,
+  apiGetBanners,
+  apiGetGallery,
+  apiGetFarmProfile,
+  apiGetUserAlerts,
   apiMarkAlertsAsRead,
-  subscribeToBanners,
-  subscribeToGallery,
-  subscribeToFarmProfile,
-  cleanFakeUsers,
+  subscribeToUserDoc,
+  clearAllAppCache,
+  classifyFirestoreError,
+  getFriendlyErrorMessage,
 } from './services/api';
 import { Header } from './components/Header';
 import { AuthScreen } from './components/AuthScreen';
@@ -40,11 +54,17 @@ import { ProfitView } from './components/ProfitView';
 import { FarmGalleryView } from './components/FarmGalleryView';
 import { AdminPortal } from './components/AdminPortal';
 import { StaffPortal } from './components/StaffPortal';
+import { AlertTriangle, X } from 'lucide-react';
 
 export default function App() {
   const [currentUser, setCurrentUserState] = useState<UserAccount | null>(() => getCurrentUser());
   const [lang, setLang] = useState<'en' | 'ur'>(() => getLanguagePreference());
-  const [activeScreen, setActiveScreen] = useState<string>('dashboard');
+  const [activeScreen, setActiveScreen] = useState<string>(() => {
+    const u = getCurrentUser();
+    if (u?.role === 'admin') return 'admin';
+    if (u?.role === 'staff') return 'staff';
+    return 'dashboard';
+  });
 
   const [collections, setCollections] = useState<EggCollectionRecord[]>([]);
   const [userAlerts, setUserAlerts] = useState<UserAlert[]>([]);
@@ -67,6 +87,10 @@ export default function App() {
   const [banners, setBanners] = useState<FarmBanner[]>(DEFAULT_BANNERS);
   const [galleryItems, setGalleryItems] = useState<FarmGalleryItem[]>(DEFAULT_GALLERY_ITEMS);
   const [farmProfile, setFarmProfile] = useState<FarmProfileSettings>(DEFAULT_FARM_PROFILE);
+  const [dbNotice, setDbNotice] = useState<string | null>(null);
+  const [isRefreshingDashboard, setIsRefreshingDashboard] = useState(false);
+
+  const galleryLoadedRef = useRef(false);
 
   // Keep HTML lang and dir attribute synced with selected language
   useEffect(() => {
@@ -79,74 +103,157 @@ export default function App() {
     }
   }, [lang]);
 
-  // Centralized Firebase Cloud Sync: live Firestore onSnapshot listeners
+  // Surface quota/network errors gracefully without logging out or crashing the UI
+  const reportDbError = useCallback(
+    (err: any) => {
+      const classified = classifyFirestoreError(err, lang);
+      if (classified.kind === 'quota' || classified.kind === 'network' || classified.kind === 'permission') {
+        setDbNotice(getFriendlyErrorMessage(err, lang));
+      }
+    },
+    [lang]
+  );
+
+  // Load initial data strictly AFTER sign-in, scoped to the user's role
   useEffect(() => {
-    // Clean fake/dummy users on window load (Requirement 3)
-    cleanFakeUsers();
+    if (!currentUser?.id) return;
+    let cancelled = false;
 
-    // 1. Live Global Stats listener
-    const unsubStats = subscribeToGlobalStats((freshStats) => {
-      setGlobalStats(freshStats);
-    });
-
-    // 2. Live Ads Banners listener
-    const unsubBanners = subscribeToBanners((freshBanners) => {
-      if (freshBanners && freshBanners.length > 0) {
-        setBanners(freshBanners);
-      }
-    });
-
-    // 3. Live Farm Gallery listener
-    const unsubGallery = subscribeToGallery((liveGallery) => {
-      if (liveGallery && liveGallery.length > 0) {
-        setGalleryItems(liveGallery);
-      }
-    });
-
-    // 4. Live Farm Profile listener (Fully Manual Admin Profile & Header, No forced Sargodha)
-    const unsubProfile = subscribeToFarmProfile((freshProfile) => {
-      if (freshProfile) {
-        setFarmProfile(freshProfile);
-      }
-    });
-
-    if (!currentUser) {
+    // Admin & Staff load their own data lazily per tab — skip all App-level investor reads & listeners!
+    if (currentUser.role === 'admin' || currentUser.role === 'staff') {
       return () => {
-        unsubStats();
-        unsubBanners();
-        unsubGallery();
-        unsubProfile();
+        cancelled = true;
       };
     }
 
-    // 5. Live User profile listener (instantly reflects Admin package approvals and egg collections)
-    const unsubUser = subscribeToUserDoc(currentUser.id, async (freshUser) => {
-      if (freshUser) {
-        setCurrentUserState(freshUser);
-        setCurrentUser(freshUser);
-        try {
-          const freshCols = await apiGetCollections(freshUser);
-          setCollections(freshCols);
-        } catch {
-          // Ignore
-        }
+    // 1. Load Farm Profile once (cached 15 min) for investor header/footer branding
+    apiGetFarmProfile(false)
+      .then((profile) => {
+        if (!cancelled && profile) setFarmProfile(profile);
+      })
+      .catch((err) => {
+        if (!cancelled) reportDbError(err);
+      });
+
+    // 2. Investor one-time cached reads (reused across tab navigation)
+    Promise.allSettled([
+      apiGetStats(false),
+      apiGetBanners(false),
+      apiGetCollections(currentUser, false),
+      apiGetUserAlerts(currentUser.id, false),
+    ]).then(([statsRes, bannersRes, colsRes, alertsRes]) => {
+      if (cancelled) return;
+      let firstErr: any = null;
+
+      if (statsRes.status === 'fulfilled' && statsRes.value) {
+        setGlobalStats(statsRes.value);
+      } else if (statsRes.status === 'rejected') {
+        firstErr = firstErr || statsRes.reason;
+      }
+
+      if (bannersRes.status === 'fulfilled' && bannersRes.value && bannersRes.value.length > 0) {
+        setBanners(bannersRes.value);
+      } else if (bannersRes.status === 'rejected') {
+        firstErr = firstErr || bannersRes.reason;
+      }
+
+      if (colsRes.status === 'fulfilled' && colsRes.value) {
+        setCollections(colsRes.value);
+      } else if (colsRes.status === 'rejected') {
+        firstErr = firstErr || colsRes.reason;
+      }
+
+      if (alertsRes.status === 'fulfilled' && alertsRes.value) {
+        setUserAlerts(alertsRes.value);
+      } else if (alertsRes.status === 'rejected') {
+        firstErr = firstErr || alertsRes.reason;
+      }
+
+      if (firstErr) {
+        reportDbError(firstErr);
       }
     });
 
-    // 6. Live User Alerts listener (for Notifications / Farm Inbox)
-    const unsubAlerts = subscribeToUserAlerts(currentUser.id, (freshAlerts) => {
-      setUserAlerts(freshAlerts);
+    // 3. Retain ONLY ONE real-time listener: the investor's own profile document
+    //    so Admin package approvals & wallet changes reflect immediately without extra queries.
+    const unsubUser = subscribeToUserDoc(currentUser.id, (freshUser) => {
+      if (!cancelled && freshUser) {
+        setCurrentUserState(freshUser);
+        setCurrentUser(freshUser);
+      }
     });
 
     return () => {
-      unsubStats();
-      unsubBanners();
-      unsubGallery();
-      unsubProfile();
+      cancelled = true;
       unsubUser();
-      unsubAlerts();
     };
-  }, [currentUser?.id]);
+  }, [currentUser?.id, currentUser?.role, reportDbError]);
+
+  // Lazy-load Farm Gallery ONLY when the user actually visits the Gallery tab
+  useEffect(() => {
+    if (!currentUser || activeScreen !== 'gallery' || galleryLoadedRef.current) return;
+    let cancelled = false;
+    apiGetGallery(false)
+      .then((items) => {
+        if (!cancelled && items && items.length > 0) {
+          setGalleryItems(items);
+          galleryLoadedRef.current = true;
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) reportDbError(err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser, activeScreen, reportDbError]);
+
+  // Targeted manual Refresh for User Dashboard (reloads ONLY dashboard data, never full DB)
+  const handleRefreshDashboard = useCallback(async () => {
+    if (!currentUser?.id || isRefreshingDashboard) return;
+    setIsRefreshingDashboard(true);
+    setDbNotice(null);
+    try {
+      const [userRes, statsRes, colsRes, alertsRes] = await Promise.allSettled([
+        apiGetUserById(currentUser.id, true),
+        apiGetStats(true),
+        apiGetCollections(currentUser, true),
+        apiGetUserAlerts(currentUser.id, true),
+      ]);
+
+      let firstErr: any = null;
+      if (userRes.status === 'fulfilled' && userRes.value) {
+        setCurrentUserState(userRes.value);
+        setCurrentUser(userRes.value);
+      } else if (userRes.status === 'rejected') {
+        firstErr = firstErr || userRes.reason;
+      }
+
+      if (statsRes.status === 'fulfilled' && statsRes.value) {
+        setGlobalStats(statsRes.value);
+      } else if (statsRes.status === 'rejected') {
+        firstErr = firstErr || statsRes.reason;
+      }
+
+      if (colsRes.status === 'fulfilled' && colsRes.value) {
+        setCollections(colsRes.value);
+      } else if (colsRes.status === 'rejected') {
+        firstErr = firstErr || colsRes.reason;
+      }
+
+      if (alertsRes.status === 'fulfilled' && alertsRes.value) {
+        setUserAlerts(alertsRes.value);
+      } else if (alertsRes.status === 'rejected') {
+        firstErr = firstErr || alertsRes.reason;
+      }
+
+      if (firstErr) {
+        reportDbError(firstErr);
+      }
+    } finally {
+      setIsRefreshingDashboard(false);
+    }
+  }, [currentUser, isRefreshingDashboard, reportDbError]);
 
   const handleToggleLang = () => {
     const nextLang = lang === 'en' ? 'ur' : 'en';
@@ -184,18 +291,13 @@ export default function App() {
       : userAlerts.filter((a) => !a.read && !readAlertIds.has(a.id)).length;
 
   const handleLoginSuccess = async (user: UserAccount) => {
+    setDbNotice(null);
     setCurrentUserState(user);
     try {
       const raw = localStorage.getItem(`pakhen_read_alerts_${user.id}`);
       if (raw) setReadAlertIds(new Set(JSON.parse(raw)));
     } catch {
       // ignore
-    }
-    try {
-      const cols = await apiGetCollections(user);
-      setCollections(cols);
-    } catch {
-      // Ignore
     }
     if (user.role === 'admin') {
       setActiveScreen('admin');
@@ -207,12 +309,17 @@ export default function App() {
   };
 
   const handleLogout = () => {
+    clearAllAppCache();
+    galleryLoadedRef.current = false;
+    setDbNotice(null);
+    setCollections([]);
+    setUserAlerts([]);
     setCurrentUser(null);
     setCurrentUserState(null);
     setActiveScreen('dashboard');
   };
 
-  // If not authenticated, show Clean Sign In / Register Screen with NO navigation headers
+  // If not authenticated, show Clean Sign In / Register Screen with ZERO Firestore reads
   if (!currentUser) {
     return (
       <AuthScreen
@@ -236,6 +343,26 @@ export default function App() {
         unreadAlertsCount={unreadAlertsCount}
       />
 
+      {/* Non-blocking Graceful Quota / Network Notice (Preserves Active Session) */}
+      {dbNotice && (
+        <div className="w-full max-w-5xl mx-auto px-3 sm:px-6 pt-3">
+          <div className="flex items-start justify-between gap-3 rounded-2xl border border-amber-500/50 bg-amber-950/75 px-4 py-3 text-xs text-amber-100 shadow-lg">
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400 mt-0.5" />
+              <span className="leading-relaxed">{dbNotice}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setDbNotice(null)}
+              aria-label={lang === 'ur' ? 'بند کریں' : 'Dismiss notice'}
+              className="shrink-0 rounded-lg p-1 text-amber-300 hover:bg-amber-900/50 cursor-pointer"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Main Content Area with padding-bottom for sticky bottom bar */}
       <main className="flex-1 w-full max-w-5xl mx-auto px-3 sm:px-6 pt-5 pb-28 sm:pb-32">
         {currentUser.role === 'admin' ? (
@@ -249,11 +376,15 @@ export default function App() {
                 user={currentUser}
                 collections={collections}
                 globalStats={globalStats}
+                alerts={userAlerts}
                 onNavigate={handleNavigate}
                 unreadAlertsCount={unreadAlertsCount}
                 banners={banners}
+                onRefreshDashboard={handleRefreshDashboard}
+                isRefreshingDashboard={isRefreshingDashboard}
                 onCollectedEggs={(record, updatedUser) => {
                   setCurrentUserState(updatedUser);
+                  setCurrentUser(updatedUser);
                   setCollections((prev) => [record, ...prev]);
                 }}
                 lang={lang}
@@ -363,16 +494,26 @@ export default function App() {
         <div className="max-w-5xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2">
           <div className="flex items-center gap-2 text-[#d4af37] font-semibold">
             <img src="/golden-hen.svg" alt="Golden Hen" className="h-5 w-5" />
-            <span>{farmProfile.farmName || 'Pak Hen Farm'} • {lang === 'ur' ? (farmProfile.farmBioUr || 'پورے پاکستان میں حقیقی فزیکل پولٹری فارمنگ') : (farmProfile.farmBio || 'Real Physical Poultry Farming Across Pakistan')}</span>
+            <span>
+              {farmProfile.farmName || 'Pak Hen Farm'} •{' '}
+              {lang === 'ur'
+                ? farmProfile.farmBioUr || 'پورے پاکستان میں حقیقی فزیکل پولٹری فارمنگ'
+                : farmProfile.farmBio || 'Real Physical Poultry Farming Across Pakistan'}
+            </span>
           </div>
           <div className="text-xs text-[#f3df88]/80 font-medium">
-            {lang === 'ur' ? '100٪ مصدقہ شرعی مضاربہ و فزیکل پولٹری فارمنگ' : '100% Verified Physical Poultry Farming & Shariah Partnership'}
+            {lang === 'ur'
+              ? '100٪ مصدقہ شرعی مضاربہ و فزیکل پولٹری فارمنگ'
+              : '100% Verified Physical Poultry Farming & Shariah Partnership'}
           </div>
         </div>
       </footer>
 
       {/* Fixed Bottom Navigation Bar (Sticky - Always visible without scrolling) */}
-      <nav aria-label="Bottom Navigation" className="fixed bottom-0 left-0 right-0 z-50 bg-[#08130e]/95 backdrop-blur-md border-t border-[#d4af37] px-3 py-2 shadow-[0_-10px_25px_rgba(0,0,0,0.5)]">
+      <nav
+        aria-label="Bottom Navigation"
+        className="fixed bottom-0 left-0 right-0 z-50 bg-[#08130e]/95 backdrop-blur-md border-t border-[#d4af37] px-3 py-2 shadow-[0_-10px_25px_rgba(0,0,0,0.5)]"
+      >
         <div className="max-w-md mx-auto flex items-center justify-around">
           <a
             href="#dashboard"

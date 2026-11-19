@@ -1,6 +1,8 @@
 /**
  * Pak Hen Farm - Centralized Cloud Database Client API
- * Powered 100% by Firebase Cloud Database for real-time cross-device synchronization.
+ * Powered 100% by Firebase Cloud Database with Free-Tier read optimization,
+ * short-lived in-memory + sessionStorage caching, in-flight deduplication,
+ * intelligent post-write cache invalidation, and quota circuit-breaker protection.
  */
 
 import {
@@ -15,6 +17,10 @@ import {
   MedicalPaymentOrder,
   PaymentAccount,
   PaymentMethodType,
+  PaymentSettings,
+  FarmBanner,
+  FarmGalleryItem,
+  FarmProfileSettings,
 } from '../types/farm';
 import {
   cloudSignIn,
@@ -28,6 +34,7 @@ import {
   cloudRejectWithdrawal,
   cloudCollectEggs,
   cloudGetCollections,
+  cloudGetGlobalStats,
   cloudUpdateStats,
   cloudSyncGlobalStatsFromSheds,
   cloudCreateTicket,
@@ -40,6 +47,8 @@ import {
   subscribeToUserDoc,
   subscribeToSheds,
   subscribeToUserAlerts,
+  cloudGetSheds,
+  cloudGetUserAlerts,
   cloudMarkAlertsAsRead,
   cloudApplyShedMortality,
   cloudUpdateShedCracking,
@@ -54,6 +63,8 @@ import {
   subscribeToMedicalPayments,
   subscribeToPaymentMethods,
   subscribeToPaymentSettings,
+  cloudGetPaymentMethods,
+  cloudGetPaymentSettings,
   cloudUpdatePaymentSettings,
   cloudAddPaymentMethod,
   cloudUpdatePaymentMethod,
@@ -61,24 +72,45 @@ import {
   cloudGetUserById,
   cloudUpdateUserProfile,
   subscribeToBanners,
-  cloudSaveBanners,
-  cloudUpdateBanner,
+  cloudGetBanners,
+  cloudSaveBanners as _cloudSaveBanners,
+  cloudUpdateBanner as _cloudUpdateBanner,
   subscribeToGallery,
-  cloudSaveGallery,
-  cloudAddGalleryItem,
-  cloudDeleteGalleryItem,
-  cloudToggleGalleryItemActive,
-  cloudLikeGalleryItem,
+  cloudGetGallery,
+  cloudSaveGallery as _cloudSaveGallery,
+  cloudAddGalleryItem as _cloudAddGalleryItem,
+  cloudDeleteGalleryItem as _cloudDeleteGalleryItem,
+  cloudToggleGalleryItemActive as _cloudToggleGalleryItemActive,
+  cloudLikeGalleryItem as _cloudLikeGalleryItem,
   subscribeToFarmProfile,
-  cloudSaveFarmProfile,
+  cloudGetFarmProfile,
+  cloudSaveFarmProfile as _cloudSaveFarmProfile,
   cleanFakeUsers,
   cloudClaimReferralMilestone,
-  cloudToggleTicketRead,
+  cloudToggleTicketRead as _cloudToggleTicketRead,
+  cloudGetMyReferrals,
+  cloudGetUserOrders,
+  cloudGetAdminOrders,
+  cloudGetUserWithdrawals,
+  cloudGetAdminWithdrawals,
+  cloudGetAdminUsers,
+  cloudGetUserTickets,
+  cloudGetAdminTickets,
+  cloudGetAdminMedicalPayments,
   INITIAL_PAYMENT_METHODS,
-  db,
 } from './firebase';
-import { collection, getDocs, doc, getDoc } from 'firebase/firestore';
 import { validateMediaUploadFile } from '../utils/farmRules';
+import {
+  CACHE_TTL_MS,
+  getOrFetchCached,
+  setCachedValue,
+  invalidateCacheKey,
+  invalidateCachePrefix,
+  clearAllAppCache,
+  classifyFirestoreError,
+  getFriendlyErrorMessage,
+  isQuotaCooldownActive,
+} from '../utils/firestoreCache';
 
 export {
   subscribeToOrders,
@@ -96,31 +128,42 @@ export {
   subscribeToGallery,
   subscribeToFarmProfile,
   cleanFakeUsers,
-  cloudToggleTicketRead,
-  cloudApplyShedMortality,
-  cloudUpdateShedCracking,
-  cloudUpdateShedDailyLog,
-  cloudSyncGlobalStatsFromSheds,
-  cloudDeclareShedSickness,
-  cloudPayMedicalFee,
-  cloudSubmitMedicalPaymentTid,
-  cloudApproveMedicalPayment,
-  cloudRejectMedicalPayment,
-  cloudSaveBanners,
-  cloudUpdateBanner,
-  cloudSaveGallery,
-  cloudAddGalleryItem,
-  cloudDeleteGalleryItem,
-  cloudToggleGalleryItemActive,
-  cloudLikeGalleryItem,
-  cloudSaveFarmProfile,
   INITIAL_PAYMENT_METHODS,
+  clearAllAppCache,
+  classifyFirestoreError,
+  getFriendlyErrorMessage,
+  isQuotaCooldownActive,
 };
+
+// Cache key registry (centralized so invalidation is exact and bug-free)
+export const CACHE_KEYS = {
+  user: (userId: string) => `user:${userId}`,
+  globalStats: 'global:stats',
+  sheds: 'global:sheds',
+  paymentMethods: 'global:paymentMethods',
+  paymentSettings: 'global:paymentSettings',
+  banners: 'global:banners',
+  gallery: 'global:gallery',
+  farmProfile: 'global:farmProfile',
+  collections: (userId: string) => `collections:${userId}`,
+  alerts: (userId: string) => `alerts:${userId}`,
+  userOrders: (userId: string) => `orders:user:${userId}`,
+  adminOrders: 'orders:admin',
+  userWithdrawals: (userId: string) => `withdrawals:user:${userId}`,
+  adminWithdrawals: 'withdrawals:admin',
+  referrals: (referralCode: string) => `referrals:${referralCode}`,
+  userTickets: (userId: string) => `tickets:user:${userId}`,
+  adminTickets: 'tickets:admin',
+  adminMedical: 'medical:admin',
+  adminUsers: 'users:admin',
+} as const;
 
 // ---------------- AUTH ----------------
 
 export async function apiLogin(email: string, password: string): Promise<UserAccount> {
-  return await cloudSignIn(email, password);
+  const user = await cloudSignIn(email, password);
+  setCachedValue(CACHE_KEYS.user(user.id), user, CACHE_TTL_MS.userProfile);
+  return user;
 }
 
 export async function apiRegister(details: {
@@ -132,7 +175,13 @@ export async function apiRegister(details: {
   easypaisaNumber?: string;
   referralCode?: string;
 }): Promise<UserAccount> {
-  return await cloudRegister(details);
+  const user = await cloudRegister(details);
+  setCachedValue(CACHE_KEYS.user(user.id), user, CACHE_TTL_MS.userProfile);
+  invalidateCacheKey(CACHE_KEYS.adminUsers);
+  if (details.referralCode) {
+    invalidateCacheKey(CACHE_KEYS.referrals(details.referralCode.trim().toUpperCase()));
+  }
+  return user;
 }
 
 export async function apiResetPassword(details: {
@@ -140,44 +189,181 @@ export async function apiResetPassword(details: {
   phoneOrEasypaisa: string;
   newPassword: string;
 }): Promise<UserAccount> {
-  return await cloudResetPassword(details);
-}
-
-export async function apiSyncUser(user: UserAccount): Promise<UserAccount> {
-  try {
-    const snap = await getDoc(doc(db, 'users', user.id));
-    if (snap.exists()) {
-      return snap.data() as UserAccount;
-    }
-  } catch (e) {
-    console.error('Error syncing user with Firestore:', e);
-  }
+  const user = await cloudResetPassword(details);
+  setCachedValue(CACHE_KEYS.user(user.id), user, CACHE_TTL_MS.userProfile);
   return user;
 }
 
-// ---------------- USERS DIRECTORY (ADMIN) ----------------
-
-export async function apiGetUsers(_adminUser?: UserAccount): Promise<UserAccount[]> {
-  const snap = await getDocs(collection(db, 'users'));
-  const users: UserAccount[] = [];
-  snap.forEach((d) => users.push(d.data() as UserAccount));
-  users.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  return users;
+export async function apiSyncUser(user: UserAccount, forceRefresh: boolean = false): Promise<UserAccount> {
+  try {
+    const fresh = await apiGetUserById(user.id, forceRefresh);
+    return fresh || user;
+  } catch (e) {
+    console.error('Error syncing user with Firestore:', e);
+    return user;
+  }
 }
 
-// ---------------- ORDERS (REQUIREMENT 2: CLOUD SAVING) ----------------
+export async function apiGetUserById(
+  userId: string,
+  forceRefresh: boolean = false
+): Promise<UserAccount | null> {
+  return await getOrFetchCached(
+    CACHE_KEYS.user(userId),
+    () => cloudGetUserById(userId),
+    { ttlMs: CACHE_TTL_MS.userProfile, forceRefresh, persist: true }
+  );
+}
 
-export async function apiGetOrders(user: UserAccount): Promise<HenOrder[]> {
-  const snap = await getDocs(collection(db, 'orders'));
-  const list: HenOrder[] = [];
-  snap.forEach((d) => {
-    const o = d.data() as HenOrder;
-    if (user.role === 'admin' || o.userId === user.id) {
-      list.push(o);
-    }
-  });
-  list.sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());
-  return list;
+export async function apiUpdateUserProfile(
+  userId: string,
+  updates: Partial<UserAccount>
+): Promise<UserAccount> {
+  const updated = await cloudUpdateUserProfile(userId, updates);
+  setCachedValue(CACHE_KEYS.user(userId), updated, CACHE_TTL_MS.userProfile);
+  invalidateCacheKey(CACHE_KEYS.adminUsers);
+  return updated;
+}
+
+// ---------------- STATIC / SHARED CONFIG (LONG TTL CACHED) ----------------
+
+export async function apiGetFarmProfile(forceRefresh: boolean = false): Promise<FarmProfileSettings> {
+  return await getOrFetchCached(
+    CACHE_KEYS.farmProfile,
+    () => cloudGetFarmProfile(),
+    { ttlMs: CACHE_TTL_MS.farmProfile, forceRefresh, persist: true }
+  );
+}
+
+export async function cloudSaveFarmProfile(profile: FarmProfileSettings): Promise<void> {
+  await _cloudSaveFarmProfile(profile);
+  setCachedValue(CACHE_KEYS.farmProfile, profile, CACHE_TTL_MS.farmProfile);
+}
+
+export async function apiGetBanners(forceRefresh: boolean = false): Promise<FarmBanner[]> {
+  return await getOrFetchCached(
+    CACHE_KEYS.banners,
+    () => cloudGetBanners(),
+    { ttlMs: CACHE_TTL_MS.banners, forceRefresh, persist: true }
+  );
+}
+
+export async function cloudSaveBanners(banners: FarmBanner[]): Promise<void> {
+  await _cloudSaveBanners(banners);
+  setCachedValue(CACHE_KEYS.banners, banners, CACHE_TTL_MS.banners);
+}
+
+export async function cloudUpdateBanner(banner: FarmBanner): Promise<void> {
+  await _cloudUpdateBanner(banner);
+  invalidateCacheKey(CACHE_KEYS.banners);
+}
+
+export async function apiGetGallery(forceRefresh: boolean = false): Promise<FarmGalleryItem[]> {
+  return await getOrFetchCached(
+    CACHE_KEYS.gallery,
+    () => cloudGetGallery(),
+    { ttlMs: CACHE_TTL_MS.gallery, forceRefresh, persist: true }
+  );
+}
+
+export async function cloudSaveGallery(items: FarmGalleryItem[]): Promise<void> {
+  await _cloudSaveGallery(items);
+  setCachedValue(CACHE_KEYS.gallery, items, CACHE_TTL_MS.gallery);
+}
+
+export async function cloudAddGalleryItem(item: FarmGalleryItem): Promise<void> {
+  await _cloudAddGalleryItem(item);
+  invalidateCacheKey(CACHE_KEYS.gallery);
+}
+
+export async function cloudDeleteGalleryItem(id: string): Promise<void> {
+  await _cloudDeleteGalleryItem(id);
+  invalidateCacheKey(CACHE_KEYS.gallery);
+}
+
+export async function cloudToggleGalleryItemActive(id: string, active: boolean): Promise<void> {
+  await _cloudToggleGalleryItemActive(id, active);
+  invalidateCacheKey(CACHE_KEYS.gallery);
+}
+
+export async function cloudLikeGalleryItem(id: string): Promise<void> {
+  await _cloudLikeGalleryItem(id);
+  invalidateCacheKey(CACHE_KEYS.gallery);
+}
+
+// ---------------- USERS DIRECTORY & REFERRALS ----------------
+
+export async function apiGetAdminUsers(
+  limitCount: number = 150,
+  forceRefresh: boolean = false
+): Promise<UserAccount[]> {
+  return await getOrFetchCached(
+    CACHE_KEYS.adminUsers,
+    () => cloudGetAdminUsers(limitCount),
+    { ttlMs: CACHE_TTL_MS.adminUsers, forceRefresh, persist: true }
+  );
+}
+
+export async function apiGetUsers(_adminUser?: UserAccount, forceRefresh: boolean = false): Promise<UserAccount[]> {
+  return await apiGetAdminUsers(150, forceRefresh);
+}
+
+export async function apiGetMyReferrals(
+  referralCode: string,
+  forceRefresh: boolean = false
+): Promise<UserAccount[]> {
+  if (!referralCode) return [];
+  const normalized = referralCode.trim().toUpperCase();
+  return await getOrFetchCached(
+    CACHE_KEYS.referrals(normalized),
+    () => cloudGetMyReferrals(normalized),
+    { ttlMs: CACHE_TTL_MS.referrals, forceRefresh, persist: true }
+  );
+}
+
+export async function apiSetUserStatus(
+  adminUser: UserAccount,
+  targetUserId: string,
+  status: 'active' | 'suspended' | 'banned',
+  reason?: string
+): Promise<void> {
+  await cloudSetUserStatus(adminUser, targetUserId, status, reason);
+  invalidateCacheKey(CACHE_KEYS.user(targetUserId));
+  invalidateCacheKey(CACHE_KEYS.adminUsers);
+}
+
+// ---------------- ORDERS (INDEXED + LIMITED + CACHED) ----------------
+
+export async function apiGetUserOrders(
+  userId: string,
+  forceRefresh: boolean = false
+): Promise<HenOrder[]> {
+  return await getOrFetchCached(
+    CACHE_KEYS.userOrders(userId),
+    () => cloudGetUserOrders(userId, 50),
+    { ttlMs: CACHE_TTL_MS.orders, forceRefresh, persist: true }
+  );
+}
+
+export async function apiGetAdminOrders(
+  limitCount: number = 120,
+  forceRefresh: boolean = false
+): Promise<HenOrder[]> {
+  return await getOrFetchCached(
+    CACHE_KEYS.adminOrders,
+    () => cloudGetAdminOrders(limitCount),
+    { ttlMs: CACHE_TTL_MS.orders, forceRefresh, persist: true }
+  );
+}
+
+export async function apiGetOrders(
+  user: UserAccount,
+  forceRefresh: boolean = false
+): Promise<HenOrder[]> {
+  if (user.role === 'admin') {
+    return await apiGetAdminOrders(120, forceRefresh);
+  }
+  return await apiGetUserOrders(user.id, forceRefresh);
 }
 
 export async function apiCreateOrder(
@@ -192,29 +378,69 @@ export async function apiCreateOrder(
     paymentMethodId?: string;
     paymentMethodTitle?: string;
     proofSlipUrl?: string;
+    proofSlipSizeBytes?: number;
   }
 ): Promise<HenOrder> {
-  return await cloudSubmitOrder(user, orderData);
+  const created = await cloudSubmitOrder(user, orderData);
+  invalidateCacheKey(CACHE_KEYS.userOrders(user.id));
+  invalidateCacheKey(CACHE_KEYS.adminOrders);
+  return created;
 }
 
-export async function apiApproveOrder(_adminUser: UserAccount, orderId: string, adminNote?: string): Promise<void> {
-  const orderRef = doc(db, 'orders', orderId);
-  const snap = await getDoc(orderRef);
-  if (!snap.exists()) throw new Error('Order not found');
-  await cloudApproveOrder(snap.data() as HenOrder, adminNote);
+export async function apiApproveOrder(
+  _adminUser: UserAccount,
+  orderId: string,
+  adminNote?: string
+) {
+  const result = await cloudApproveOrder(orderId, adminNote);
+  // Invalidate exact affected caches so balances, sheds, and orders stay 100% fresh
+  invalidateCacheKey(CACHE_KEYS.adminOrders);
+  invalidateCacheKey(CACHE_KEYS.sheds);
+  invalidateCacheKey(CACHE_KEYS.globalStats);
+  invalidateCacheKey(CACHE_KEYS.adminUsers);
+  if (result?.updatedUser?.id) {
+    setCachedValue(CACHE_KEYS.user(result.updatedUser.id), result.updatedUser, CACHE_TTL_MS.userProfile);
+    invalidateCacheKey(CACHE_KEYS.userOrders(result.updatedUser.id));
+    invalidateCacheKey(CACHE_KEYS.alerts(result.updatedUser.id));
+  }
+  return result;
 }
 
-export async function apiRejectOrder(_adminUser: UserAccount, orderId: string, adminNote?: string): Promise<void> {
+export async function apiRejectOrder(
+  _adminUser: UserAccount,
+  orderId: string,
+  adminNote?: string
+): Promise<void> {
   await cloudRejectOrder(orderId, adminNote);
+  invalidateCacheKey(CACHE_KEYS.adminOrders);
+  invalidateCachePrefix('orders:user:');
 }
 
-// ---------------- DYNAMIC PAYMENT METHODS API ----------------
+// ---------------- DYNAMIC PAYMENT METHODS & SETTINGS ----------------
+
+export async function apiGetPaymentMethods(forceRefresh: boolean = false): Promise<PaymentAccount[]> {
+  return await getOrFetchCached(
+    CACHE_KEYS.paymentMethods,
+    () => cloudGetPaymentMethods(),
+    { ttlMs: CACHE_TTL_MS.paymentMethods, forceRefresh, persist: true }
+  );
+}
+
+export async function apiGetPaymentSettings(forceRefresh: boolean = false): Promise<PaymentSettings> {
+  return await getOrFetchCached(
+    CACHE_KEYS.paymentSettings,
+    () => cloudGetPaymentSettings(),
+    { ttlMs: CACHE_TTL_MS.paymentSettings, forceRefresh, persist: true }
+  );
+}
 
 export async function apiAddPaymentMethod(
   _adminUser: UserAccount,
   method: Omit<PaymentAccount, 'id' | 'createdAt'>
 ): Promise<PaymentAccount> {
-  return await cloudAddPaymentMethod(method);
+  const created = await cloudAddPaymentMethod(method);
+  invalidateCacheKey(CACHE_KEYS.paymentMethods);
+  return created;
 }
 
 export async function apiUpdatePaymentMethod(
@@ -223,28 +449,54 @@ export async function apiUpdatePaymentMethod(
   updates: Partial<PaymentAccount>
 ): Promise<void> {
   await cloudUpdatePaymentMethod(id, updates);
+  invalidateCacheKey(CACHE_KEYS.paymentMethods);
 }
 
-export async function apiDeletePaymentMethod(
-  _adminUser: UserAccount,
-  id: string
-): Promise<void> {
+export async function apiDeletePaymentMethod(_adminUser: UserAccount, id: string): Promise<void> {
   await cloudDeletePaymentMethod(id);
+  invalidateCacheKey(CACHE_KEYS.paymentMethods);
+}
+
+export async function apiUpdatePaymentSettings(
+  _adminUser: UserAccount,
+  updates: { customGreeting?: string; customGreetingUr?: string }
+): Promise<void> {
+  await cloudUpdatePaymentSettings(updates);
+  invalidateCacheKey(CACHE_KEYS.paymentSettings);
 }
 
 // ---------------- WITHDRAWALS ----------------
 
-export async function apiGetWithdrawals(user: UserAccount): Promise<WithdrawalRequest[]> {
-  const snap = await getDocs(collection(db, 'withdrawals'));
-  const list: WithdrawalRequest[] = [];
-  snap.forEach((d) => {
-    const w = d.data() as WithdrawalRequest;
-    if (user.role === 'admin' || w.userId === user.id) {
-      list.push(w);
-    }
-  });
-  list.sort((a, b) => new Date(b.requestedAt).getTime() - new Date(a.requestedAt).getTime());
-  return list;
+export async function apiGetUserWithdrawals(
+  userId: string,
+  forceRefresh: boolean = false
+): Promise<WithdrawalRequest[]> {
+  return await getOrFetchCached(
+    CACHE_KEYS.userWithdrawals(userId),
+    () => cloudGetUserWithdrawals(userId, 50),
+    { ttlMs: CACHE_TTL_MS.withdrawals, forceRefresh, persist: true }
+  );
+}
+
+export async function apiGetAdminWithdrawals(
+  limitCount: number = 120,
+  forceRefresh: boolean = false
+): Promise<WithdrawalRequest[]> {
+  return await getOrFetchCached(
+    CACHE_KEYS.adminWithdrawals,
+    () => cloudGetAdminWithdrawals(limitCount),
+    { ttlMs: CACHE_TTL_MS.withdrawals, forceRefresh, persist: true }
+  );
+}
+
+export async function apiGetWithdrawals(
+  user: UserAccount,
+  forceRefresh: boolean = false
+): Promise<WithdrawalRequest[]> {
+  if (user.role === 'admin') {
+    return await apiGetAdminWithdrawals(120, forceRefresh);
+  }
+  return await apiGetUserWithdrawals(user.id, forceRefresh);
 }
 
 export async function apiCreateWithdrawal(
@@ -255,21 +507,50 @@ export async function apiCreateWithdrawal(
     easypaisaTitle: string;
   }
 ): Promise<{ withdrawal: WithdrawalRequest; updatedUser: UserAccount }> {
-  return await cloudRequestWithdrawal(user, details.amount, details.easypaisaNumber, details.easypaisaTitle);
+  const result = await cloudRequestWithdrawal(
+    user,
+    details.amount,
+    details.easypaisaNumber,
+    details.easypaisaTitle
+  );
+  setCachedValue(CACHE_KEYS.user(user.id), result.updatedUser, CACHE_TTL_MS.userProfile);
+  invalidateCacheKey(CACHE_KEYS.userWithdrawals(user.id));
+  invalidateCacheKey(CACHE_KEYS.adminWithdrawals);
+  return result;
 }
 
-export async function apiMarkWithdrawalPaid(_adminUser: UserAccount, id: string, adminNote?: string): Promise<void> {
+export async function apiMarkWithdrawalPaid(
+  _adminUser: UserAccount,
+  id: string,
+  adminNote?: string
+): Promise<void> {
   await cloudMarkWithdrawalPaid(id, adminNote);
+  invalidateCacheKey(CACHE_KEYS.adminWithdrawals);
+  invalidateCachePrefix('withdrawals:user:');
 }
 
-export async function apiRejectWithdrawal(_adminUser: UserAccount, id: string, reason: string): Promise<void> {
+export async function apiRejectWithdrawal(
+  _adminUser: UserAccount,
+  id: string,
+  reason: string
+): Promise<void> {
   await cloudRejectWithdrawal(id, reason);
+  invalidateCacheKey(CACHE_KEYS.adminWithdrawals);
+  invalidateCachePrefix('withdrawals:user:');
+  invalidateCacheKey(CACHE_KEYS.adminUsers);
 }
 
 // ---------------- EGG COLLECTIONS ----------------
 
-export async function apiGetCollections(user: UserAccount): Promise<EggCollectionRecord[]> {
-  return await cloudGetCollections(user.id);
+export async function apiGetCollections(
+  user: UserAccount,
+  forceRefresh: boolean = false
+): Promise<EggCollectionRecord[]> {
+  return await getOrFetchCached(
+    CACHE_KEYS.collections(user.id),
+    () => cloudGetCollections(user.id, 60),
+    { ttlMs: CACHE_TTL_MS.collections, forceRefresh, persist: true }
+  );
 }
 
 export async function apiCollectEggs(
@@ -281,63 +562,52 @@ export async function apiCollectEggs(
   totalProfit?: number;
   records?: EggCollectionRecord[];
 }> {
-  return await cloudCollectEggs(user);
+  const result = await cloudCollectEggs(user);
+  setCachedValue(CACHE_KEYS.user(user.id), result.updatedUser, CACHE_TTL_MS.userProfile);
+  invalidateCacheKey(CACHE_KEYS.collections(user.id));
+  invalidateCacheKey(CACHE_KEYS.adminUsers);
+  return result;
 }
 
-// ---------------- GLOBAL STATS ----------------
+// ---------------- GLOBAL STATS & SHEDS ----------------
 
-export async function apiGetStats(): Promise<GlobalFarmStats> {
-  const snap = await getDoc(doc(db, 'stats', 'dailyProduction'));
-  if (snap.exists()) {
-    return snap.data() as GlobalFarmStats;
-  }
-  return {
-    totalCollected: 0,
-    cracked: 0,
-    netFresh: 0,
-    lastUpdated: new Date().toISOString(),
-  };
+export async function apiGetStats(forceRefresh: boolean = false): Promise<GlobalFarmStats> {
+  return await getOrFetchCached(
+    CACHE_KEYS.globalStats,
+    () => cloudGetGlobalStats(),
+    { ttlMs: CACHE_TTL_MS.globalStats, forceRefresh, persist: true }
+  );
 }
 
 export async function apiUpdateStats(
   _adminUser: UserAccount,
   stats: { totalCollected: number; cracked: number; netFresh: number }
 ): Promise<GlobalFarmStats> {
-  return await cloudUpdateStats(stats);
+  const updated = await cloudUpdateStats(stats);
+  setCachedValue(CACHE_KEYS.globalStats, updated, CACHE_TTL_MS.globalStats);
+  return updated;
 }
 
 export async function apiSyncGlobalStatsFromSheds(_adminUser: UserAccount): Promise<GlobalFarmStats> {
-  return await cloudSyncGlobalStatsFromSheds();
+  const updated = await cloudSyncGlobalStatsFromSheds();
+  setCachedValue(CACHE_KEYS.globalStats, updated, CACHE_TTL_MS.globalStats);
+  return updated;
 }
 
-// ---------------- SUPPORT TICKETS ----------------
-
-export async function apiGetTickets(user: UserAccount): Promise<SupportTicket[]> {
-  const snap = await getDocs(collection(db, 'tickets'));
-  const list: SupportTicket[] = [];
-  snap.forEach((d) => {
-    const t = d.data() as SupportTicket;
-    if (user.role === 'admin' || user.role === 'staff' || t.userId === user.id) {
-      list.push(t);
-    }
-  });
-  list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  return list;
+export async function cloudSyncGlobalStatsFromShedsWrapper(): Promise<GlobalFarmStats> {
+  const updated = await cloudSyncGlobalStatsFromSheds();
+  setCachedValue(CACHE_KEYS.globalStats, updated, CACHE_TTL_MS.globalStats);
+  return updated;
 }
+export { cloudSyncGlobalStatsFromShedsWrapper as cloudSyncGlobalStatsFromSheds };
 
-export async function apiCreateTicket(
-  user: UserAccount,
-  subject: string,
-  message: string
-): Promise<SupportTicket> {
-  return await cloudCreateTicket(user, subject, message);
+export async function apiGetSheds(forceRefresh: boolean = false): Promise<FarmShed[]> {
+  return await getOrFetchCached(
+    CACHE_KEYS.sheds,
+    () => cloudGetSheds(),
+    { ttlMs: CACHE_TTL_MS.sheds, forceRefresh, persist: true }
+  );
 }
-
-export async function apiReplyTicket(_staffUser: UserAccount, ticketId: string, reply: string): Promise<void> {
-  await cloudReplyTicket(ticketId, reply);
-}
-
-// ---------------- LIVE SHEDS & USER ALERTS ----------------
 
 export async function apiApplyShedMortality(
   _adminUser: UserAccount,
@@ -346,46 +616,178 @@ export async function apiApplyShedMortality(
   pricePerHen?: number
 ): Promise<void> {
   await cloudApplyShedMortality(shedId, deaths, pricePerHen);
+  invalidateCacheKey(CACHE_KEYS.sheds);
+  invalidateCacheKey(CACHE_KEYS.globalStats);
+  invalidateCacheKey(CACHE_KEYS.adminUsers);
 }
 
-export async function apiUpdateShedCracking(_adminUser: UserAccount, shedId: string, crackedEggsCount: number): Promise<void> {
-  await cloudUpdateShedCracking(shedId, crackedEggsCount);
+export async function cloudApplyShedMortalityWrapper(
+  shedId: string,
+  deaths: number,
+  pricePerHen?: number
+): Promise<void> {
+  await cloudApplyShedMortality(shedId, deaths, pricePerHen);
+  invalidateCacheKey(CACHE_KEYS.sheds);
+  invalidateCacheKey(CACHE_KEYS.globalStats);
+  invalidateCacheKey(CACHE_KEYS.adminUsers);
 }
+export { cloudApplyShedMortalityWrapper as cloudApplyShedMortality };
+
+export async function apiUpdateShedCracking(
+  _adminUser: UserAccount,
+  shedId: string,
+  crackedEggsCount: number
+): Promise<void> {
+  await cloudUpdateShedCracking(shedId, crackedEggsCount);
+  invalidateCacheKey(CACHE_KEYS.sheds);
+  invalidateCacheKey(CACHE_KEYS.globalStats);
+}
+
+export async function cloudUpdateShedCrackingWrapper(
+  shedId: string,
+  crackedEggsCount: number
+): Promise<void> {
+  await cloudUpdateShedCracking(shedId, crackedEggsCount);
+  invalidateCacheKey(CACHE_KEYS.sheds);
+  invalidateCacheKey(CACHE_KEYS.globalStats);
+}
+export { cloudUpdateShedCrackingWrapper as cloudUpdateShedCracking };
 
 export async function apiUpdateShedDailyLog(
   _adminUser: UserAccount,
   shedId: string,
   log: { dailyEggCollection?: number; crackedEggsCount: number }
 ): Promise<FarmShed> {
-  return await cloudUpdateShedDailyLog(shedId, log);
+  const updated = await cloudUpdateShedDailyLog(shedId, log);
+  invalidateCacheKey(CACHE_KEYS.sheds);
+  invalidateCacheKey(CACHE_KEYS.globalStats);
+  return updated;
 }
 
-export async function apiUpdatePaymentSettings(_adminUser: UserAccount, updates: { customGreeting?: string; customGreetingUr?: string }): Promise<void> {
-  await cloudUpdatePaymentSettings(updates);
+export async function cloudUpdateShedDailyLogWrapper(
+  shedId: string,
+  log: { dailyEggCollection?: number; crackedEggsCount: number }
+): Promise<FarmShed> {
+  const updated = await cloudUpdateShedDailyLog(shedId, log);
+  invalidateCacheKey(CACHE_KEYS.sheds);
+  invalidateCacheKey(CACHE_KEYS.globalStats);
+  return updated;
 }
+export { cloudUpdateShedDailyLogWrapper as cloudUpdateShedDailyLog };
 
-export async function apiDeclareShedSickness(_adminUser: UserAccount, shedId: string, isSick: boolean): Promise<void> {
+export async function apiDeclareShedSickness(
+  _adminUser: UserAccount,
+  shedId: string,
+  isSick: boolean
+): Promise<void> {
   await cloudDeclareShedSickness(shedId, isSick);
+  invalidateCacheKey(CACHE_KEYS.sheds);
 }
 
-export async function apiPayMedicalFee(user: UserAccount, alertId: string): Promise<UserAccount> {
-  return await cloudPayMedicalFee(user, alertId);
+export async function cloudDeclareShedSicknessWrapper(shedId: string, isSick: boolean): Promise<void> {
+  await cloudDeclareShedSickness(shedId, isSick);
+  invalidateCacheKey(CACHE_KEYS.sheds);
+}
+export { cloudDeclareShedSicknessWrapper as cloudDeclareShedSickness };
+
+// ---------------- SUPPORT TICKETS ----------------
+
+export async function apiGetUserTickets(
+  userId: string,
+  forceRefresh: boolean = false
+): Promise<SupportTicket[]> {
+  return await getOrFetchCached(
+    CACHE_KEYS.userTickets(userId),
+    () => cloudGetUserTickets(userId, 50),
+    { ttlMs: CACHE_TTL_MS.tickets, forceRefresh, persist: true }
+  );
+}
+
+export async function apiGetAdminTickets(
+  limitCount: number = 100,
+  forceRefresh: boolean = false
+): Promise<SupportTicket[]> {
+  return await getOrFetchCached(
+    CACHE_KEYS.adminTickets,
+    () => cloudGetAdminTickets(limitCount),
+    { ttlMs: CACHE_TTL_MS.tickets, forceRefresh, persist: true }
+  );
+}
+
+export async function apiGetTickets(
+  user: UserAccount,
+  forceRefresh: boolean = false
+): Promise<SupportTicket[]> {
+  if (user.role === 'admin' || user.role === 'staff') {
+    return await apiGetAdminTickets(100, forceRefresh);
+  }
+  return await apiGetUserTickets(user.id, forceRefresh);
+}
+
+export async function apiCreateTicket(
+  user: UserAccount,
+  subject: string,
+  message: string
+): Promise<SupportTicket> {
+  const created = await cloudCreateTicket(user, subject, message);
+  invalidateCacheKey(CACHE_KEYS.userTickets(user.id));
+  invalidateCacheKey(CACHE_KEYS.adminTickets);
+  return created;
+}
+
+export async function apiReplyTicket(_staffUser: UserAccount, ticketId: string, reply: string): Promise<void> {
+  await cloudReplyTicket(ticketId, reply);
+  invalidateCacheKey(CACHE_KEYS.adminTickets);
+  invalidateCachePrefix('tickets:user:');
+}
+
+export async function cloudToggleTicketRead(ticketId: string, read: boolean): Promise<void> {
+  await _cloudToggleTicketRead(ticketId, read);
+  invalidateCacheKey(CACHE_KEYS.adminTickets);
+}
+
+// ---------------- USER ALERTS ----------------
+
+export async function apiGetUserAlerts(
+  userId: string,
+  forceRefresh: boolean = false
+): Promise<UserAlert[]> {
+  return await getOrFetchCached(
+    CACHE_KEYS.alerts(userId),
+    () => cloudGetUserAlerts(userId, 50),
+    { ttlMs: CACHE_TTL_MS.alerts, forceRefresh, persist: true }
+  );
 }
 
 export async function apiMarkAlertsAsRead(userId: string, alertIds?: string[]): Promise<void> {
   await cloudMarkAlertsAsRead(userId, alertIds);
+  invalidateCacheKey(CACHE_KEYS.alerts(userId));
 }
 
-export async function apiSetUserStatus(
-  adminUser: UserAccount,
-  targetUserId: string,
-  status: 'active' | 'suspended' | 'banned',
-  reason?: string
-): Promise<void> {
-  await cloudSetUserStatus(adminUser, targetUserId, status, reason);
+// ---------------- MEDICAL FEE & APPROVALS ----------------
+
+export async function apiGetAdminMedicalPayments(
+  limitCount: number = 100,
+  forceRefresh: boolean = false
+): Promise<MedicalPaymentOrder[]> {
+  return await getOrFetchCached(
+    CACHE_KEYS.adminMedical,
+    () => cloudGetAdminMedicalPayments(limitCount),
+    { ttlMs: CACHE_TTL_MS.medical, forceRefresh, persist: true }
+  );
 }
 
-// ---------------- MEDICAL FEE & APPROVALS (PHASE 3) ----------------
+export async function apiPayMedicalFee(user: UserAccount, alertId: string): Promise<UserAccount> {
+  const updated = await cloudPayMedicalFee(user, alertId);
+  setCachedValue(CACHE_KEYS.user(user.id), updated, CACHE_TTL_MS.userProfile);
+  invalidateCacheKey(CACHE_KEYS.alerts(user.id));
+  return updated;
+}
+
+export async function cloudPayMedicalFeeWrapper(user: UserAccount, alertId: string): Promise<UserAccount> {
+  return await apiPayMedicalFee(user, alertId);
+}
+export { cloudPayMedicalFeeWrapper as cloudPayMedicalFee };
 
 export async function apiSubmitMedicalPaymentTid(params: {
   userId: string;
@@ -402,21 +804,48 @@ export async function apiSubmitMedicalPaymentTid(params: {
   senderName?: string;
   senderNumber?: string;
 }): Promise<MedicalPaymentOrder> {
-  return await cloudSubmitMedicalPaymentTid(params);
+  const order = await cloudSubmitMedicalPaymentTid(params);
+  invalidateCacheKey(CACHE_KEYS.adminMedical);
+  invalidateCacheKey(CACHE_KEYS.alerts(params.userId));
+  return order;
 }
+
+export { apiSubmitMedicalPaymentTid as cloudSubmitMedicalPaymentTid };
 
 export async function apiApproveMedicalPayment(_adminUser: UserAccount, orderId: string): Promise<void> {
   await cloudApproveMedicalPayment(orderId);
+  invalidateCacheKey(CACHE_KEYS.adminMedical);
+  invalidateCachePrefix('alerts:');
 }
 
-export async function apiRejectMedicalPayment(_adminUser: UserAccount, orderId: string, adminNote?: string): Promise<void> {
-  await cloudRejectMedicalPayment(orderId, adminNote);
+export async function cloudApproveMedicalPaymentWrapper(orderId: string): Promise<void> {
+  await cloudApproveMedicalPayment(orderId);
+  invalidateCacheKey(CACHE_KEYS.adminMedical);
+  invalidateCachePrefix('alerts:');
 }
+export { cloudApproveMedicalPaymentWrapper as cloudApproveMedicalPayment };
+
+export async function apiRejectMedicalPayment(
+  _adminUser: UserAccount,
+  orderId: string,
+  adminNote?: string
+): Promise<void> {
+  await cloudRejectMedicalPayment(orderId, adminNote);
+  invalidateCacheKey(CACHE_KEYS.adminMedical);
+  invalidateCachePrefix('alerts:');
+}
+
+export async function cloudRejectMedicalPaymentWrapper(orderId: string, adminNote?: string): Promise<void> {
+  await cloudRejectMedicalPayment(orderId, adminNote);
+  invalidateCacheKey(CACHE_KEYS.adminMedical);
+  invalidateCachePrefix('alerts:');
+}
+export { cloudRejectMedicalPaymentWrapper as cloudRejectMedicalPayment };
 
 export async function apiSendAdminCustomMessage(
   adminUser: UserAccount,
   params: {
-    targetUserId?: string; // undefined, 'ALL', or 'ALL_USERS'
+    targetUserId?: string;
     subject: string;
     message: string;
   }
@@ -427,18 +856,8 @@ export async function apiSendAdminCustomMessage(
     subject: params.subject,
     message: params.message,
   });
+  invalidateCachePrefix('alerts:');
   return { count };
-}
-
-export async function apiGetUserById(userId: string): Promise<UserAccount | null> {
-  return await cloudGetUserById(userId);
-}
-
-export async function apiUpdateUserProfile(
-  userId: string,
-  updates: Partial<UserAccount>
-): Promise<UserAccount> {
-  return await cloudUpdateUserProfile(userId, updates);
 }
 
 /**
@@ -513,7 +932,8 @@ export async function apiClaimReferralMilestone(
   userId: string,
   targetId?: string
 ): Promise<{ updatedUser: UserAccount; creditedAmount: number; claimedIds: string[] }> {
-  return await cloudClaimReferralMilestone(userId, targetId);
+  const result = await cloudClaimReferralMilestone(userId, targetId);
+  setCachedValue(CACHE_KEYS.user(userId), result.updatedUser, CACHE_TTL_MS.userProfile);
+  invalidateCacheKey(CACHE_KEYS.adminUsers);
+  return result;
 }
-
-

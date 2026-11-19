@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { UserAccount, SupportTicket } from '../types/farm';
 import { OFFICIAL_INFO } from '../utils/farmRules';
-import { apiGetTickets, apiReplyTicket, subscribeToTickets } from '../services/api';
+import { apiGetAdminTickets, apiReplyTicket, getFriendlyErrorMessage } from '../services/api';
 import { t } from '../utils/translations';
-import { Headphones, CheckCircle2, Send, Clock, User, Phone, Mail, RefreshCw } from 'lucide-react';
+import { Headphones, CheckCircle2, Send, Clock, User, Phone, Mail, RefreshCw, AlertCircle } from 'lucide-react';
 
 interface StaffPortalProps {
   staffUser: UserAccount;
@@ -16,33 +16,49 @@ export const StaffPortal: React.FC<StaffPortalProps> = ({ staffUser, lang }) => 
 
   const [tickets, setTickets] = useState<SupportTicket[]>([]);
   const [replyTextMap, setReplyTextMap] = useState<Record<string, string>>({});
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [feedback, setFeedback] = useState<{ type: 'error' | 'success'; text: string } | null>(null);
 
-  const fetchTickets = async () => {
+  const fetchTickets = async (forceRefresh: boolean = false) => {
+    if (forceRefresh && isRefreshing) return;
+    if (forceRefresh) setIsRefreshing(true);
+    setFeedback(null);
     try {
-      const list = await apiGetTickets(staffUser);
+      const list = await apiGetAdminTickets(100, forceRefresh);
       setTickets(list);
-    } catch (e) {
-      console.error('Error fetching tickets:', e);
+    } catch (e: any) {
+      setFeedback({ type: 'error', text: getFriendlyErrorMessage(e, lang) });
+    } finally {
+      if (forceRefresh) setIsRefreshing(false);
     }
   };
 
   useEffect(() => {
-    const unsub = subscribeToTickets('staff', staffUser.id, (list) => {
-      setTickets(list);
-    });
-    return () => unsub();
+    fetchTickets(false);
   }, [staffUser.id]);
 
   const handleReply = async (ticketId: string) => {
     const text = replyTextMap[ticketId]?.trim();
     if (!text) return;
+    setFeedback(null);
 
     try {
       await apiReplyTicket(staffUser, ticketId, text);
-      await fetchTickets();
+      const repliedAt = new Date().toISOString();
+      setTickets((prev) =>
+        prev.map((tk) =>
+          tk.id === ticketId
+            ? { ...tk, status: 'resolved', staffReply: text, repliedAt }
+            : tk
+        )
+      );
       setReplyTextMap((prev) => ({ ...prev, [ticketId]: '' }));
+      setFeedback({
+        type: 'success',
+        text: isUr ? 'جواب کامیابی سے ارسال کر دیا گیا۔' : 'Reply sent successfully.',
+      });
     } catch (err: any) {
-      alert(err.message || 'Error replying to ticket');
+      setFeedback({ type: 'error', text: getFriendlyErrorMessage(err, lang) });
     }
   };
 
@@ -67,13 +83,32 @@ export const StaffPortal: React.FC<StaffPortalProps> = ({ staffUser, lang }) => 
         </div>
 
         <button
-          onClick={fetchTickets}
-          className="flex items-center gap-1.5 rounded-xl border border-[#d4af37]/40 bg-[#0a2618] px-3 py-1.5 text-xs font-bold text-[#f3df88] hover:bg-[#0f3422] cursor-pointer self-start sm:self-auto"
+          type="button"
+          onClick={() => fetchTickets(true)}
+          disabled={isRefreshing}
+          className="flex items-center gap-1.5 rounded-xl border border-[#d4af37]/40 bg-[#0a2618] px-3 py-1.5 text-xs font-bold text-[#f3df88] hover:bg-[#0f3422] cursor-pointer self-start sm:self-auto disabled:opacity-50"
         >
-          <RefreshCw className="h-3.5 w-3.5" />
+          <RefreshCw className={`h-3.5 w-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
           <span>{isUr ? 'تازہ کریں' : 'Refresh Tickets'}</span>
         </button>
       </div>
+
+      {feedback && (
+        <div
+          className={`flex items-center gap-2 rounded-2xl border p-3.5 text-xs font-semibold ${
+            feedback.type === 'error'
+              ? 'border-rose-500/50 bg-rose-950/70 text-rose-200'
+              : 'border-emerald-500/50 bg-emerald-950/70 text-emerald-200'
+          }`}
+        >
+          {feedback.type === 'error' ? (
+            <AlertCircle className="h-4 w-4 shrink-0 text-rose-400" />
+          ) : (
+            <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
+          )}
+          <span>{feedback.text}</span>
+        </div>
+      )}
 
       {/* Prominent Helpline Card */}
       <div className="rounded-3xl border border-emerald-500/40 bg-gradient-to-r from-[#0a2819] to-[#0d3420] p-5 shadow-xl flex items-center justify-between">

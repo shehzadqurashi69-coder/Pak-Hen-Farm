@@ -17,7 +17,7 @@ import {
   mergeAllSheds,
   SHED_CAPACITY,
 } from '../utils/farmRules';
-import { subscribeToUserAlerts, apiPayMedicalFee, subscribeToSheds } from '../services/api';
+import { apiGetSheds, getFriendlyErrorMessage } from '../services/api';
 import { t } from '../utils/translations';
 import { TrustBadge } from './TrustBadge';
 import { BannerSlider } from './BannerSlider';
@@ -54,8 +54,11 @@ interface UserDashboardProps {
   user: UserAccount;
   collections: EggCollectionRecord[];
   globalStats: GlobalFarmStats;
+  alerts?: UserAlert[];
   onNavigate: (screen: string) => void;
   onCollectedEggs: (record: EggCollectionRecord, updatedUser: UserAccount) => void;
+  onRefreshDashboard?: () => Promise<void>;
+  isRefreshingDashboard?: boolean;
   lang: 'en' | 'ur';
   unreadAlertsCount?: number;
   banners?: FarmBanner[];
@@ -65,8 +68,11 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
   user,
   collections,
   globalStats,
+  alerts = [],
   onNavigate,
   onCollectedEggs,
+  onRefreshDashboard,
+  isRefreshingDashboard = false,
   lang,
   unreadAlertsCount = 0,
   banners = DEFAULT_BANNERS,
@@ -92,27 +98,53 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
 
   const userLocked = isUserLocked(user);
 
-  // Live Alerts & Sheds subscription
-  const [alerts, setAlerts] = useState<UserAlert[]>([]);
+  // Cached one-time shed fetch (reused across navigation; zero continuous onSnapshot listeners)
   const [sheds, setSheds] = useState<FarmShed[]>(INITIAL_SHEDS);
   const [activeMedicalAlert, setActiveMedicalAlert] = useState<UserAlert | null>(null);
-  const [payingAlertId, setPayingAlertId] = useState<string | null>(null);
+  const [isRefreshingSheds, setIsRefreshingSheds] = useState(false);
   const [alertError, setAlertError] = useState<string | null>(null);
   const [alertSuccess, setAlertSuccess] = useState<string | null>(null);
 
   useEffect(() => {
     if (!user?.id) return;
-    const unsubAlerts = subscribeToUserAlerts(user.id, (liveAlerts) => {
-      setAlerts(liveAlerts);
-    });
-    const unsubSheds = subscribeToSheds((liveSheds) => {
-      setSheds(liveSheds);
-    });
+    let cancelled = false;
+    apiGetSheds(false)
+      .then((cachedSheds) => {
+        if (!cancelled && cachedSheds.length > 0) {
+          setSheds(cachedSheds);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setAlertError(getFriendlyErrorMessage(err, lang));
+        }
+      });
     return () => {
-      unsubAlerts();
-      unsubSheds();
+      cancelled = true;
     };
-  }, [user?.id]);
+  }, [user?.id, lang]);
+
+  const isRefreshing = isRefreshingDashboard || isRefreshingSheds;
+
+  const handleManualRefresh = async () => {
+    if (isRefreshing) return;
+    setAlertError(null);
+    setAlertSuccess(null);
+    setIsRefreshingSheds(true);
+    try {
+      const [freshSheds] = await Promise.all([
+        apiGetSheds(true),
+        onRefreshDashboard ? onRefreshDashboard() : Promise.resolve(),
+      ]);
+      if (freshSheds && freshSheds.length > 0) {
+        setSheds(freshSheds);
+      }
+    } catch (err: any) {
+      setAlertError(getFriendlyErrorMessage(err, lang));
+    } finally {
+      setIsRefreshingSheds(false);
+    }
+  };
 
   // Extract assigned shed numbers & multi-shed proportional loss breakdown
   const userHensByShed = getUserActiveHensByShed({ activeHens: liveActiveHens, packages: allUserPackages }, now);
@@ -140,8 +172,22 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
 
   return (
     <div className="space-y-6 pb-12">
-      {/* Prominently displayed Trust Badge */}
-      <TrustBadge lang={lang} />
+      {/* Prominently displayed Trust Badge + Targeted Dashboard Refresh Button */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+        <div className="flex-1 min-w-0">
+          <TrustBadge lang={lang} />
+        </div>
+        <button
+          type="button"
+          onClick={handleManualRefresh}
+          disabled={isRefreshing}
+          aria-label={isUr ? 'ڈیش بورڈ ریفریش کریں' : 'Refresh Dashboard'}
+          className="self-end sm:self-center inline-flex items-center gap-1.5 rounded-xl border border-[#d4af37]/45 bg-[#0a2618] px-3.5 py-2 text-xs font-bold text-[#f3df88] hover:border-[#d4af37] hover:bg-[#0f3422] active:scale-95 transition-all cursor-pointer disabled:opacity-55 disabled:cursor-not-allowed shrink-0 shadow-md"
+        >
+          <RefreshCw className={`h-3.5 w-3.5 text-[#d4af37] ${isRefreshing ? 'animate-spin' : ''}`} />
+          <span>{isRefreshing ? (isUr ? 'اپڈیٹ ہو رہا ہے...' : 'Refreshing...') : isUr ? 'ریفریش کریں' : 'Refresh'}</span>
+        </button>
+      </div>
 
       {/* Admin Image Banner Slider (Ads System - Auto-Scrolling Carousel) */}
       <BannerSlider banners={banners} lang={lang} />

@@ -5,8 +5,11 @@ import {
   evaluateReferralMilestones,
   MilestoneProgressItem,
 } from '../utils/farmRules';
-import { subscribeToMyReferrals } from '../services/firebase';
-import { apiClaimReferralMilestone } from '../services/api';
+import {
+  apiClaimReferralMilestone,
+  apiGetMyReferrals,
+  getFriendlyErrorMessage,
+} from '../services/api';
 import { setCurrentUser } from '../services/storage';
 import { t } from '../utils/translations';
 import {
@@ -55,11 +58,20 @@ export const ReferralMilestoneBoard: React.FC<ReferralMilestoneBoardProps> = ({
       return;
     }
     if (!user?.referralCode) return;
-    const unsub = subscribeToMyReferrals(user.referralCode, (list) => {
-      setReferrals(list);
-    });
-    return () => unsub();
-  }, [user?.referralCode, referralsOverride]);
+    let cancelled = false;
+    apiGetMyReferrals(user.referralCode, false)
+      .then((list) => {
+        if (!cancelled) setReferrals(list);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setClaimBanner({ type: 'error', text: getFriendlyErrorMessage(err, lang) });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.referralCode, referralsOverride, lang]);
 
   const referralUrl = `${window.location.origin}/?ref=${user.referralCode}`;
   const claimedTargets = user.claimedMilestoneTargets || [];
@@ -91,12 +103,11 @@ export const ReferralMilestoneBoard: React.FC<ReferralMilestoneBoardProps> = ({
     setTimeout(() => setCopied(false), 2500);
   };
 
-  const handleShareWhatsApp = () => {
-    const message = isUr
+  const whatsappShareUrl = `https://wa.me/?text=${encodeURIComponent(
+    isUr
       ? `السلام علیکم! پاک ہین فارم میں شامل ہوں اور حقیقی فزیکل مرغیوں کے ذریعے روزانہ انڈے وصول کریں۔ اس لنک سے اکاؤنٹ بنائیں: ${referralUrl}`
-      : `Join Pak Hen Farm (Real physical poultry farming across Pakistan) and earn daily returns! Sign up with my link: ${referralUrl}`;
-    window.open(`https://wa.me/?text=${encodeURIComponent(message)}`, '_blank');
-  };
+      : `Join Pak Hen Farm (Real physical poultry farming across Pakistan) and earn daily returns! Sign up with my link: ${referralUrl}`
+  )}`;
 
   const handleClaimMilestone = async (targetId: string) => {
     if (claimingTargetId) return;
@@ -126,7 +137,7 @@ export const ReferralMilestoneBoard: React.FC<ReferralMilestoneBoardProps> = ({
     } catch (err: any) {
       setClaimBanner({
         type: 'error',
-        text: err?.message || 'Unable to claim milestone bonus right now.',
+        text: getFriendlyErrorMessage(err, lang),
       });
     } finally {
       setClaimingTargetId(null);
@@ -349,14 +360,15 @@ export const ReferralMilestoneBoard: React.FC<ReferralMilestoneBoardProps> = ({
               {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
               <span>{copied ? strings.linkCopied : isUr ? 'لنک کاپی کریں' : 'Copy Link'}</span>
             </button>
-            <button
-              type="button"
-              onClick={handleShareWhatsApp}
+            <a
+              href={whatsappShareUrl}
+              target="_blank"
+              rel="noopener noreferrer"
               className="flex items-center gap-1.5 rounded-xl bg-[#25D366] px-3.5 py-2 text-xs font-black text-white hover:bg-[#20ba5a] active:scale-95 transition-all cursor-pointer"
             >
               <Share2 className="h-3.5 w-3.5" />
               <span>WhatsApp</span>
-            </button>
+            </a>
           </div>
         </div>
       )}
