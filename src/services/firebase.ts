@@ -89,6 +89,13 @@ import {
   MAX_ORDER_DOC_BYTES,
   computeIncrementalShedAndGlobalStats,
 } from '../utils/farmRules';
+import {
+  normalizeTrxId,
+  buildUniqueOrderTrxDocId,
+  buildUniqueMedicalTrxDocId,
+  buildDailyDateKey,
+  buildDailyEggCollectDocId,
+} from '../utils/actionLock';
 
 // --------------------------------------------------------------------------------------
 // FIREBASE CONFIG PLACEHOLDER (PASTE YOUR KEYS HERE IF USING YOUR OWN PROJECT)
@@ -781,12 +788,15 @@ export async function cloudSubmitOrder(
     throw new Error(validation.error || 'Invalid package order details.');
   }
 
-  const lowerTid = validation.normalizedTid;
+  const lowerTid = normalizeTrxId(cleanTid);
+  const deterministicOrderId = buildUniqueOrderTrxDocId(lowerTid);
+  const deterministicMedId = buildUniqueMedicalTrxDocId(lowerTid);
 
-  // Targeted O(1) duplicate TID checks (zero full-collection scans on orders or medicalPayments)
-  const [dupNormSnap, dupExactSnap, dupMedSnap] = await Promise.all([
+  // Targeted O(1) duplicate TID pre-checks against legacy non-deterministic docs (zero full-collection scans)
+  const [dupNormSnap, dupExactSnap, dupMedNormSnap, dupMedExactSnap] = await Promise.all([
     getDocs(query(collection(db, 'orders'), where('tidNormalized', '==', lowerTid), limit(1))),
     getDocs(query(collection(db, 'orders'), where('tid', '==', cleanTid), limit(1))),
+    getDocs(query(collection(db, 'medicalPayments'), where('tidNormalized', '==', lowerTid), limit(1))),
     getDocs(query(collection(db, 'medicalPayments'), where('tid', '==', cleanTid), limit(1))),
   ]);
 
@@ -796,14 +806,12 @@ export async function cloudSubmitOrder(
     );
   }
 
-  if (!dupMedSnap.empty) {
+  if (!dupMedNormSnap.empty || !dupMedExactSnap.empty) {
     throw new Error('This Transaction ID (TxID) has already been submitted for a medical fee payment.');
   }
 
-  const orderId =
-    'ORD-' + Date.now().toString(36).toUpperCase() + '-' + Math.floor(100 + Math.random() * 900);
   const newOrder: HenOrder = {
-    id: orderId,
+    id: deterministicOrderId,
     userId: user.id,
     userName: user.fullName || 'Investor',
     userEmail: user.email || '',
@@ -823,7 +831,7 @@ export async function cloudSubmitOrder(
     proofSlipSizeBytes: orderData.proofSlipSizeBytes || validation.proofSlipBytes,
   };
 
-  // Strip any undefined fields so Firestore setDoc never rejects optional keys
+  // Strip any undefined fields so Firestore never rejects optional keys
   const sanitizedOrder = sanitizeFirestorePayload(newOrder);
   const payloadBytes = estimateUtf8ByteLength(JSON.stringify(sanitizedOrder));
   if (payloadBytes > MAX_ORDER_DOC_BYTES) {
@@ -832,10 +840,33 @@ export async function cloudSubmitOrder(
     );
   }
 
+  // Atomic Firestore transaction on deterministic Trx ID document:
+  // Even under slow internet or simultaneous double submissions, ONLY ONE order can ever be created
+  // for this normalized Trx ID, and it can never be submitted or accepted again.
+  const orderRef = doc(db, 'orders', deterministicOrderId);
+  const medLockRef = doc(db, 'medicalPayments', deterministicMedId);
+
   try {
-    await setDoc(doc(db, 'orders', orderId), sanitizedOrder);
+    await runTransaction(db, async (tx) => {
+      const [existingOrderSnap, existingMedSnap] = await Promise.all([
+        tx.get(orderRef),
+        tx.get(medLockRef),
+      ]);
+
+      if (existingOrderSnap.exists()) {
+        throw new Error(
+          'This Transaction ID (TxID) has already been processed or submitted. Each transaction ID can only be used once.'
+        );
+      }
+
+      if (existingMedSnap.exists()) {
+        throw new Error('This Transaction ID (TxID) has already been submitted for a medical fee payment.');
+      }
+
+      tx.set(orderRef, sanitizedOrder);
+    });
   } catch (err: any) {
-    console.error('Firestore cloudSubmitOrder setDoc failed:', err);
+    console.error('Firestore cloudSubmitOrder transaction failed:', err);
     if (err?.code === 'resource-exhausted' || err?.message?.includes('Quota limit exceeded')) {
       throw new Error(
         'Database daily quota limit reached. Please retry shortly or contact Farm Support with your TrxID.'
@@ -873,125 +904,143 @@ export async function cloudApproveOrder(
     throw new Error('Invalid order ID.');
   }
 
-  // 1. Read ONLY the specific order document (1 read)
+  // 1. Pre-check duplicate approved Trx ID across legacy orders (bounded limit 1)
   const orderRef = doc(db, 'orders', orderId);
-  const orderSnap = await getDoc(orderRef);
-  if (!orderSnap.exists()) {
+  const preOrderSnap = await getDoc(orderRef);
+  if (!preOrderSnap.exists()) {
     throw new Error('Order not found in database.');
   }
-  const currentOrder = orderSnap.data() as HenOrder;
-  if (currentOrder.status !== 'pending') {
-    throw new Error(`This order is already ${currentOrder.status}.`);
+  const preOrder = preOrderSnap.data() as HenOrder;
+  if (preOrder.status !== 'pending') {
+    throw new Error(`This order is already ${preOrder.status}.`);
   }
 
-  const cleanTid = (currentOrder.tid || '').trim();
-  const userRef = doc(db, 'users', currentOrder.userId);
-
-  // 2. Targeted reads only: duplicate-approved TID check (limit 1), specific buyer user doc (1 read),
-  //    and the 5 fixed shed docs (Shed-101..Shed-105) by direct document ID (zero collection scans!)
-  const [approvedTidSnap, userSnap, ...shedDocSnaps] = await Promise.all([
-    cleanTid
-      ? getDocs(
-          query(
-            collection(db, 'orders'),
-            where('tid', '==', cleanTid),
-            where('status', '==', 'approved'),
-            limit(1)
-          )
+  const cleanTid = (preOrder.tid || '').trim();
+  const normalizedTid = normalizeTrxId(cleanTid);
+  if (cleanTid) {
+    const [approvedExactSnap, approvedNormSnap] = await Promise.all([
+      getDocs(
+        query(
+          collection(db, 'orders'),
+          where('tid', '==', cleanTid),
+          where('status', '==', 'approved'),
+          limit(1)
         )
-      : Promise.resolve(null),
-    getDoc(userRef),
-    ...INITIAL_SHEDS.map((s) => getDoc(doc(db, 'sheds', s.id))),
-  ]);
-
-  if (approvedTidSnap && !approvedTidSnap.empty) {
-    throw new Error(
-      `Transaction ID "${cleanTid}" has already been approved for another package. Double approval blocked.`
-    );
+      ),
+      getDocs(
+        query(
+          collection(db, 'orders'),
+          where('tidNormalized', '==', normalizedTid),
+          where('status', '==', 'approved'),
+          limit(1)
+        )
+      ),
+    ]);
+    if (!approvedExactSnap.empty || !approvedNormSnap.empty) {
+      throw new Error(
+        `Transaction ID "${cleanTid}" has already been approved for another package. Double approval blocked.`
+      );
+    }
   }
 
-  const rawSheds: FarmShed[] = [];
-  shedDocSnaps.forEach((snap) => {
-    if (snap.exists()) {
-      rawSheds.push(snap.data() as FarmShed);
-    }
-  });
-  const currentSheds = mergeAllSheds(rawSheds);
-
-  const now = new Date();
-  const nowIso = now.toISOString();
-  const expiresAt = new Date(
-    now.getTime() + PACKAGE_VALIDITY_DAYS * 24 * 60 * 60 * 1000
-  ).toISOString();
-
-  const assignedShedId = assignAvailableShed(currentSheds, currentOrder.hensCount);
-
-  // Compute incremental updates for ONLY the assigned shed and global stats in memory (no full users scan!)
-  const { updatedShed, updatedGlobalStats } = computeIncrementalShedAndGlobalStats(
-    currentSheds,
-    assignedShedId,
-    currentOrder.hensCount,
-    nowIso
-  );
-
-  const newPkg: PurchasedPackage = {
-    id: 'PKG-' + Date.now(),
-    packageId: currentOrder.packageId,
-    hens: currentOrder.hensCount,
-    purchasePrice: currentOrder.amount,
-    purchasedAt: currentOrder.submittedAt,
-    approvedAt: nowIso,
-    expiresAt,
-    tid: currentOrder.tid,
-    active: true,
-    shedId: assignedShedId,
-  };
-
+  // 2. Atomic Firestore Transaction: re-verify pending status, read ONLY buyer user & 5 fixed shed docs,
+  //    and commit order + buyer + assigned shed + global stats in one atomic unit so double-clicking Approve
+  //    can NEVER approve or credit the same order twice.
+  let currentOrder: HenOrder = preOrder;
+  let assignedShedId = 'Shed-101';
   let inviterReferralCode: string | undefined;
   let updatedBuyerUser: UserAccount | undefined;
 
-  // 3. Commit ONLY the specific order, buyer user, assigned shed, and global stats atomically via writeBatch
-  const batch = writeBatch(db);
+  await runTransaction(db, async (tx) => {
+    const freshOrderSnap = await tx.get(orderRef);
+    if (!freshOrderSnap.exists()) {
+      throw new Error('Order not found in database.');
+    }
+    currentOrder = freshOrderSnap.data() as HenOrder;
+    if (currentOrder.status !== 'pending') {
+      throw new Error(`This order is already ${currentOrder.status}.`);
+    }
 
-  batch.update(orderRef, {
-    status: 'approved',
-    reviewedAt: nowIso,
-    adminNote: adminNote || 'Verified and approved on cloud',
-    shedId: assignedShedId,
-  });
+    const userRef = doc(db, 'users', currentOrder.userId);
+    const [userSnap, ...shedDocSnaps] = await Promise.all([
+      tx.get(userRef),
+      ...INITIAL_SHEDS.map((s) => tx.get(doc(db, 'sheds', s.id))),
+    ]);
 
-  if (userSnap.exists()) {
-    const currentBuyer = userSnap.data() as UserAccount;
-    const currentHens = Number(currentBuyer.activeHens) || 0;
-    const existingPackages = Array.isArray(currentBuyer.packages) ? currentBuyer.packages : [];
-    const nextPackages = [...existingPackages, newPkg];
-    const nextHens = currentHens + currentOrder.hensCount;
-    inviterReferralCode = currentBuyer.referredBy;
-    updatedBuyerUser = {
-      ...currentBuyer,
-      activeHens: nextHens,
-      packages: nextPackages,
+    const rawSheds: FarmShed[] = [];
+    shedDocSnaps.forEach((snap) => {
+      if (snap.exists()) {
+        rawSheds.push(snap.data() as FarmShed);
+      }
+    });
+    const currentSheds = mergeAllSheds(rawSheds);
+
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const expiresAt = new Date(
+      now.getTime() + PACKAGE_VALIDITY_DAYS * 24 * 60 * 60 * 1000
+    ).toISOString();
+
+    assignedShedId = assignAvailableShed(currentSheds, currentOrder.hensCount);
+
+    const { updatedShed, updatedGlobalStats } = computeIncrementalShedAndGlobalStats(
+      currentSheds,
+      assignedShedId,
+      currentOrder.hensCount,
+      nowIso
+    );
+
+    const newPkg: PurchasedPackage = {
+      id: 'PKG-' + Date.now(),
+      packageId: currentOrder.packageId,
+      hens: currentOrder.hensCount,
+      purchasePrice: currentOrder.amount,
+      purchasedAt: currentOrder.submittedAt,
+      approvedAt: nowIso,
+      expiresAt,
+      tid: currentOrder.tid,
+      active: true,
+      shedId: assignedShedId,
     };
 
-    batch.update(userRef, {
-      activeHens: nextHens,
-      packages: nextPackages,
+    tx.update(orderRef, {
+      status: 'approved',
+      reviewedAt: nowIso,
+      adminNote: adminNote || 'Verified and approved on cloud',
+      shedId: assignedShedId,
     });
-  }
 
-  batch.set(
-    doc(db, 'sheds', assignedShedId),
-    sanitizeFirestorePayload(updatedShed),
-    { merge: true }
-  );
+    if (userSnap.exists()) {
+      const currentBuyer = userSnap.data() as UserAccount;
+      const currentHens = Number(currentBuyer.activeHens) || 0;
+      const existingPackages = Array.isArray(currentBuyer.packages) ? currentBuyer.packages : [];
+      const nextPackages = [...existingPackages, newPkg];
+      const nextHens = currentHens + currentOrder.hensCount;
+      inviterReferralCode = currentBuyer.referredBy;
+      updatedBuyerUser = {
+        ...currentBuyer,
+        activeHens: nextHens,
+        packages: nextPackages,
+      };
 
-  batch.set(
-    doc(db, 'stats', 'dailyProduction'),
-    sanitizeFirestorePayload(updatedGlobalStats),
-    { merge: true }
-  );
+      tx.update(userRef, {
+        activeHens: nextHens,
+        packages: nextPackages,
+      });
+    }
 
-  await batch.commit();
+    tx.set(
+      doc(db, 'sheds', assignedShedId),
+      sanitizeFirestorePayload(updatedShed),
+      { merge: true }
+    );
+
+    tx.set(
+      doc(db, 'stats', 'dailyProduction'),
+      sanitizeFirestorePayload(updatedGlobalStats),
+      { merge: true }
+    );
+  });
 
   // 4. Direct Referral Commission (10% base, or 15% when Target C/D unlocked) & Milestone Target Bonus:
   //    Only executes when buyer was referred, using scoped equality queries (no full collection scan).
@@ -1140,14 +1189,24 @@ export async function cloudClaimReferralMilestone(
 }
 
 /**
- * Admin rejects order in cloud
+ * Admin rejects order atomically in cloud (prevents double-processing or rejecting an approved order)
  */
 export async function cloudRejectOrder(orderId: string, adminNote?: string): Promise<void> {
   const orderRef = doc(db, 'orders', orderId);
-  await updateDoc(orderRef, {
-    status: 'rejected',
-    reviewedAt: new Date().toISOString(),
-    adminNote: adminNote || 'Payment not verified',
+  await runTransaction(db, async (tx) => {
+    const snap = await tx.get(orderRef);
+    if (!snap.exists()) {
+      throw new Error('Order not found in database.');
+    }
+    const orderData = snap.data() as HenOrder;
+    if (orderData.status !== 'pending') {
+      throw new Error(`This order is already ${orderData.status}.`);
+    }
+    tx.update(orderRef, {
+      status: 'rejected',
+      reviewedAt: new Date().toISOString(),
+      adminNote: adminNote || 'Payment not verified',
+    });
   });
 }
 
@@ -1294,38 +1353,7 @@ export async function cloudRejectWithdrawal(wId: string, reason: string): Promis
 // ---------------- CLOUD EGG COLLECTIONS ----------------
 
 export async function cloudCollectEggs(user: UserAccount): Promise<{ record: EggCollectionRecord; updatedUser: UserAccount }> {
-  // 1. Fetch fresh user doc from database to get exact Active Hens at collection time
-  const userRef = doc(db, 'users', user.id);
-  const userSnap = await getDoc(userRef);
-  const currentUser = userSnap.exists() ? (userSnap.data() as UserAccount) : user;
-
-  // Strict User Management Check: Banned/Suspended accounts cannot collect eggs
-  if (isUserLocked(currentUser)) {
-    throw new Error(`Your account is ${currentUser.status || 'suspended'}. Egg collection is locked. Please contact Admin.`);
-  }
-
-  const now = new Date();
-
-  // 90-Day Automatic Package Expiry Verification & Auto-Sync:
-  // Re-verify package validity and update any expired packages in cloud database
-  const { updatedUser: userWithSyncedExpiry, hasExpiredChanges } = syncUserPackagesExpiry(currentUser, now);
-  if (hasExpiredChanges) {
-    try {
-      await updateDoc(userRef, {
-        activeHens: userWithSyncedExpiry.activeHens,
-        packages: userWithSyncedExpiry.packages,
-      });
-    } catch {
-      // Non-blocking in case of test/mock mode
-    }
-  }
-
-  const exactActiveHens = Number(userWithSyncedExpiry.activeHens) || 0;
-  if (exactActiveHens <= 0) {
-    throw new Error('All packages have completed their 90-day validity window and are expired. Daily egg production has stopped. Please renew or buy a new package to resume.');
-  }
-
-  // 2. Check if user has any unpaid medical fees (bounded to 30 alerts)
+  // 1. Pre-check if user has any unpaid medical fees (bounded to 30 alerts)
   const alertsSnap = await getDocs(query(collection(db, 'alerts'), where('userId', '==', user.id), limit(30)));
   const userAlerts: UserAlert[] = [];
   alertsSnap.forEach((d) => userAlerts.push(d.data() as UserAlert));
@@ -1333,86 +1361,159 @@ export async function cloudCollectEggs(user: UserAccount): Promise<{ record: Egg
     throw new Error('Daily profit is paused due to an unpaid medical fee. Please pay the Rs. 200 medical charges on your dashboard to resume.');
   }
 
-  const catchUp = calculateCatchUpCycles(currentUser.lastEggCollectionAt, currentUser.createdAt, now);
-  if (!catchUp.canCollect) {
-    throw new Error('24 hours have not elapsed since your last collection');
-  }
+  const now = new Date();
+  const todayDateKey = buildDailyDateKey(now);
+  const dailyLockDocId = buildDailyEggCollectDocId(user.id, todayDateKey);
+  const userRef = doc(db, 'users', user.id);
+  const dailyLockRef = doc(db, 'collections', dailyLockDocId);
 
-  const missedDays = Math.max(1, catchUp.missedDays);
-  const cycleDates = catchUp.cycleDates.length > 0 ? catchUp.cycleDates : [now];
+  // 2. Atomic Firestore Transaction using deterministic daily document ID:
+  //    `collections/eggCollect_${userId}_${dateKey}`
+  //    Guarantees strictly once-per-day crediting even under slow internet, retries, or rapid clicks.
+  const txResult = await runTransaction(db, async (tx) => {
+    // All reads must execute before any writes inside a Firestore transaction
+    const [userSnap, dailyLockSnap, ...shedSnaps] = await Promise.all([
+      tx.get(userRef),
+      tx.get(dailyLockRef),
+      ...INITIAL_SHEDS.map((s) => tx.get(doc(db, 'sheds', s.id))),
+    ]);
 
-  // 3. Strict 1:1 Egg Yield Math & Multi-Shed Proportional Financial Loss Calculation:
-  // Read ONLY the specific shed docs where this user holds active hens (typically 1 doc read!).
-  let mergedSheds: FarmShed[] = INITIAL_SHEDS;
-  try {
-    const userShedMap = getUserActiveHensByShed(userWithSyncedExpiry, now);
-    const activeShedIds = Object.keys(userShedMap).filter((sid) => (userShedMap[sid] || 0) > 0);
-    const idsToRead = activeShedIds.length > 0 ? activeShedIds : ['Shed-101'];
-    const shedSnaps = await Promise.all(idsToRead.map((sid) => getDoc(doc(db, 'sheds', sid))));
+    if (dailyLockSnap.exists()) {
+      throw new Error('You have already collected your daily eggs for today. Please wait for the next 24-hour cycle.');
+    }
+
+    if (!userSnap.exists()) {
+      throw new Error('User account not found.');
+    }
+
+    const currentUser = userSnap.data() as UserAccount;
+
+    // Strict User Management Check: Banned/Suspended accounts cannot collect eggs
+    if (isUserLocked(currentUser)) {
+      throw new Error(`Your account is ${currentUser.status || 'suspended'}. Egg collection is locked. Please contact Admin.`);
+    }
+
+    // 90-Day Automatic Package Expiry Verification
+    const { updatedUser: userWithSyncedExpiry, hasExpiredChanges } = syncUserPackagesExpiry(currentUser, now);
+    const exactActiveHens = Number(userWithSyncedExpiry.activeHens) || 0;
+    if (exactActiveHens <= 0) {
+      if (hasExpiredChanges) {
+        tx.update(userRef, {
+          activeHens: userWithSyncedExpiry.activeHens,
+          packages: userWithSyncedExpiry.packages,
+        });
+      }
+      throw new Error('All packages have completed their 90-day validity window and are expired. Daily egg production has stopped. Please renew or buy a new package to resume.');
+    }
+
+    const catchUp = calculateCatchUpCycles(currentUser.lastEggCollectionAt, currentUser.createdAt, now);
+    if (!catchUp.canCollect) {
+      throw new Error('24 hours have not elapsed since your last collection');
+    }
+
     const rawSheds: FarmShed[] = [];
     shedSnaps.forEach((d) => {
       if (d.exists()) rawSheds.push(d.data() as FarmShed);
     });
-    mergedSheds = mergeAllSheds(rawSheds);
-  } catch (shedErr) {
-    console.warn('Could not read sheds data for multi-shed proportional loss calculation:', shedErr);
-  }
+    const mergedSheds = mergeAllSheds(rawSheds);
 
-  const lossCalc = calculateMultiShedCollectionYield(userWithSyncedExpiry, mergedSheds, now);
-  const eggs = exactActiveHens;
-  const finalCreditPerDay = lossCalc.finalWalletCredit;
-  const totalProfitAdded = finalCreditPerDay * missedDays;
-  const allRecords: EggCollectionRecord[] = [];
+    // Build deterministic per-day cycle list; today's record ALWAYS uses `eggCollect_${userId}_${todayDateKey}`
+    const rawCycleDates = catchUp.cycleDates.length > 0 ? catchUp.cycleDates : [now];
+    const cycleEntriesMap = new Map<string, { docId: string; dateObj: Date; dateKey: string }>();
+    for (const d of rawCycleDates) {
+      const dk = buildDailyDateKey(d);
+      cycleEntriesMap.set(dk, {
+        docId: buildDailyEggCollectDocId(user.id, dk),
+        dateObj: d,
+        dateKey: dk,
+      });
+    }
+    // Guarantee today's deterministic lock doc is always written in this transaction
+    if (!cycleEntriesMap.has(todayDateKey)) {
+      cycleEntriesMap.set(todayDateKey, {
+        docId: dailyLockDocId,
+        dateObj: now,
+        dateKey: todayDateKey,
+      });
+    }
 
-  // Generate individual collection records sequentially for all missed days
-  for (let i = 0; i < cycleDates.length; i++) {
-    const d = cycleDates[i];
-    const recId = 'EGG-' + d.getTime() + '-' + Math.floor(100 + Math.random() * 900);
-    const record: EggCollectionRecord = {
-      id: recId,
-      userId: user.id,
-      timestamp: d.toISOString(),
-      date: d.toISOString().split('T')[0],
-      hensCount: exactActiveHens,
-      eggsCollected: eggs, // Strict 1:1 visual yield
-      cashEarned: finalCreditPerDay,
-      crackedDeduction: lossCalc.userShareOfLoss,
-      crackedEggsLost: lossCalc.totalCrackedEggsLost,
-      normalIncome: lossCalc.normalIncome,
-      shedLossDeduction: lossCalc.userShareOfLoss,
-      finalCredit: finalCreditPerDay,
-      totalShedLossRs: lossCalc.totalShedLossRs,
-      lossPerHen: lossCalc.lossPerHen,
-      shedDeadHens: lossCalc.totalShedDeadHens,
-      shedCrackedEggs: lossCalc.totalShedCrackedEggs,
-      shedBreakdown: lossCalc.perShedBreakdown,
+    const cycleEntries = Array.from(cycleEntriesMap.values());
+    const extraEntries = cycleEntries.filter((e) => e.docId !== dailyLockDocId);
+
+    // Check if any older catch-up day docs already exist (still before any writes)
+    const extraSnaps =
+      extraEntries.length > 0
+        ? await Promise.all(extraEntries.map((e) => tx.get(doc(db, 'collections', e.docId))))
+        : [];
+    const existingExtraIds = new Set<string>();
+    extraSnaps.forEach((snap, idx) => {
+      if (snap.exists()) existingExtraIds.add(extraEntries[idx].docId);
+    });
+
+    const uncollectedEntries = cycleEntries.filter((e) => !existingExtraIds.has(e.docId));
+    const effectiveDays = Math.max(1, uncollectedEntries.length);
+
+    const lossCalc = calculateMultiShedCollectionYield(userWithSyncedExpiry, mergedSheds, now);
+    const eggs = exactActiveHens;
+    const finalCreditPerDay = lossCalc.finalWalletCredit;
+    const totalProfitAdded = finalCreditPerDay * effectiveDays;
+    const allRecords: EggCollectionRecord[] = [];
+
+    for (const entry of uncollectedEntries) {
+      const record: EggCollectionRecord = {
+        id: entry.docId,
+        userId: user.id,
+        timestamp: entry.dateObj.toISOString(),
+        date: entry.dateKey,
+        hensCount: exactActiveHens,
+        eggsCollected: eggs,
+        cashEarned: finalCreditPerDay,
+        crackedDeduction: lossCalc.userShareOfLoss,
+        crackedEggsLost: lossCalc.totalCrackedEggsLost,
+        normalIncome: lossCalc.normalIncome,
+        shedLossDeduction: lossCalc.userShareOfLoss,
+        finalCredit: finalCreditPerDay,
+        totalShedLossRs: lossCalc.totalShedLossRs,
+        lossPerHen: lossCalc.lossPerHen,
+        shedDeadHens: lossCalc.totalShedDeadHens,
+        shedCrackedEggs: lossCalc.totalShedCrackedEggs,
+        shedBreakdown: lossCalc.perShedBreakdown,
+      };
+      tx.set(doc(db, 'collections', entry.docId), sanitizeFirestorePayload(record));
+      allRecords.push(record);
+    }
+
+    const latestRecord = allRecords[allRecords.length - 1];
+    const newBalance = (Number(currentUser.walletBalance) || 0) + totalProfitAdded;
+    const nowIso = now.toISOString();
+
+    const userUpdatePayload: Record<string, any> = {
+      walletBalance: newBalance,
+      lastEggCollectionAt: nowIso,
     };
-    await setDoc(doc(db, 'collections', recId), record);
-    allRecords.push(record);
-  }
+    if (hasExpiredChanges) {
+      userUpdatePayload.activeHens = userWithSyncedExpiry.activeHens;
+      userUpdatePayload.packages = userWithSyncedExpiry.packages;
+    }
 
-  const latestRecord = allRecords[allRecords.length - 1];
-  const newBalance = (Number(currentUser.walletBalance) || 0) + totalProfitAdded;
+    tx.update(userRef, userUpdatePayload);
 
-  // Lock button for exactly 24 hours post-collection
-  await updateDoc(userRef, {
-    walletBalance: newBalance,
-    lastEggCollectionAt: now.toISOString(),
+    const updatedUser: UserAccount = {
+      ...userWithSyncedExpiry,
+      walletBalance: newBalance,
+      lastEggCollectionAt: nowIso,
+    };
+
+    return {
+      record: latestRecord,
+      updatedUser,
+      missedDays: effectiveDays,
+      totalProfit: totalProfitAdded,
+      records: allRecords,
+    };
   });
 
-  const updatedUser: UserAccount = {
-    ...userWithSyncedExpiry,
-    walletBalance: newBalance,
-    lastEggCollectionAt: now.toISOString(),
-  };
-
-  return {
-    record: latestRecord,
-    updatedUser,
-    missedDays,
-    totalProfit: totalProfitAdded,
-    records: allRecords,
-  } as any;
+  return txResult as any;
 }
 
 /**
@@ -1916,24 +2017,29 @@ export async function cloudSubmitMedicalPaymentTid(params: {
 }): Promise<MedicalPaymentOrder> {
   const cleanTid = params.tid.trim();
   if (!cleanTid) throw new Error('Transaction ID is required');
-  const lowerTid = cleanTid.toLowerCase();
+  const lowerTid = normalizeTrxId(cleanTid);
+  const deterministicMedId = buildUniqueMedicalTrxDocId(lowerTid);
+  const deterministicOrderId = buildUniqueOrderTrxDocId(lowerTid);
 
-  // Indexed uniqueness check on medical payment TID (2 bounded limit(1) queries — zero collection scan)
-  const [medNormSnap, medExactSnap] = await Promise.all([
+  // Indexed uniqueness pre-checks against legacy records (bounded limit 1)
+  const [medNormSnap, medExactSnap, orderNormSnap, orderExactSnap] = await Promise.all([
     getDocs(query(collection(db, 'medicalPayments'), where('tidNormalized', '==', lowerTid), limit(1))),
     getDocs(query(collection(db, 'medicalPayments'), where('tid', '==', cleanTid), limit(1))),
+    getDocs(query(collection(db, 'orders'), where('tidNormalized', '==', lowerTid), limit(1))),
+    getDocs(query(collection(db, 'orders'), where('tid', '==', cleanTid), limit(1))),
   ]);
-  const isDuplicateMed = !medNormSnap.empty || !medExactSnap.empty;
 
-  if (isDuplicateMed) {
+  if (!medNormSnap.empty || !medExactSnap.empty) {
     throw new Error('This Transaction ID (TID) has already been submitted for medical verification.');
   }
+  if (!orderNormSnap.empty || !orderExactSnap.empty) {
+    throw new Error('This Transaction ID (TID) has already been used for a package order.');
+  }
 
-  const id = 'MED-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6).toUpperCase();
   const now = new Date().toISOString();
 
   const order: MedicalPaymentOrder = {
-    id,
+    id: deterministicMedId,
     userId: params.userId,
     userEmail: params.userEmail,
     userName: params.userName,
@@ -1951,17 +2057,34 @@ export async function cloudSubmitMedicalPaymentTid(params: {
     submittedAt: now,
   };
 
-  await setDoc(doc(db, 'medicalPayments', id), { ...order, tidNormalized: lowerTid });
+  const medRef = doc(db, 'medicalPayments', deterministicMedId);
+  const orderLockRef = doc(db, 'orders', deterministicOrderId);
+  const alertRef = params.alertId ? doc(db, 'alerts', params.alertId) : null;
 
-  // Update alert status with pending TID flag
-  if (params.alertId) {
-    const alertRef = doc(db, 'alerts', params.alertId);
-    await updateDoc(alertRef, {
-      paymentPendingVerification: true,
-      pendingTid: cleanTid,
-      paymentMethod: params.paymentMethod,
-    });
-  }
+  await runTransaction(db, async (tx) => {
+    const [existingMedSnap, existingOrderSnap, alertSnap] = await Promise.all([
+      tx.get(medRef),
+      tx.get(orderLockRef),
+      alertRef ? tx.get(alertRef) : Promise.resolve(null),
+    ]);
+
+    if (existingMedSnap.exists()) {
+      throw new Error('This Transaction ID (TID) has already been submitted for medical verification.');
+    }
+    if (existingOrderSnap.exists()) {
+      throw new Error('This Transaction ID (TID) has already been used for a package order.');
+    }
+
+    tx.set(medRef, sanitizeFirestorePayload({ ...order, tidNormalized: lowerTid }));
+
+    if (alertRef && alertSnap && alertSnap.exists()) {
+      tx.update(alertRef, {
+        paymentPendingVerification: true,
+        pendingTid: cleanTid,
+        paymentMethod: params.paymentMethod,
+      });
+    }
+  });
 
   return order;
 }

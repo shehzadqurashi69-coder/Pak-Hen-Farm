@@ -8,6 +8,7 @@ import {
   getFriendlyErrorMessage,
 } from '../services/api';
 import { PaymentLogo } from './PaymentLogos';
+import { useActionLock, normalizeTrxId } from '../utils/actionLock';
 import { t } from '../utils/translations';
 import {
   X,
@@ -17,6 +18,7 @@ import {
   Copy,
   Check,
   ShieldCheck,
+  Loader2,
 } from 'lucide-react';
 
 interface MedicalPaymentModalProps {
@@ -42,7 +44,7 @@ export const MedicalPaymentModal: React.FC<MedicalPaymentModalProps> = ({
   const [senderName, setSenderName] = useState(user.fullName || '');
   const [senderNumber, setSenderNumber] = useState(user.phone || '');
   const [copiedField, setCopiedField] = useState<string | null>(null);
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const { isSubmitting, runLocked: runMedicalLocked } = useActionLock();
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
@@ -92,70 +94,69 @@ export const MedicalPaymentModal: React.FC<MedicalPaymentModalProps> = ({
   };
 
   const handleWalletPay = async () => {
-    setErrorMsg(null);
-    setIsSubmitting(true);
-    try {
-      const updatedUser = await apiPayMedicalFee(user, alert.id);
-      setSuccessMsg(
-        language === 'ur'
-          ? `والٹ سے ${requiredAmount.toLocaleString()} روپے میڈیکل فیس کامیابی سے ادا ہو گئی! ٹائمر بحال کر دیا گیا۔`
-          : `Rs. ${requiredAmount.toLocaleString()} medical fee paid successfully from wallet! Collection timer unlocked.`
-      );
-      setTimeout(() => {
-        onSuccess(updatedUser);
-        onClose();
-      }, 1500);
-    } catch (err: any) {
-      setErrorMsg(getFriendlyErrorMessage(err, language));
-    } finally {
-      setIsSubmitting(false);
-    }
+    await runMedicalLocked(async () => {
+      setErrorMsg(null);
+      try {
+        const updatedUser = await apiPayMedicalFee(user, alert.id);
+        setSuccessMsg(
+          language === 'ur'
+            ? `والٹ سے ${requiredAmount.toLocaleString()} روپے میڈیکل فیس کامیابی سے ادا ہو گئی! ٹائمر بحال کر دیا گیا۔`
+            : `Rs. ${requiredAmount.toLocaleString()} medical fee paid successfully from wallet! Collection timer unlocked.`
+        );
+        setTimeout(() => {
+          onSuccess(updatedUser);
+          onClose();
+        }, 1500);
+      } catch (err: any) {
+        setErrorMsg(getFriendlyErrorMessage(err, language));
+      }
+    });
   };
 
   const handleSubmitTid = async (e: React.FormEvent) => {
     e.preventDefault();
-    setErrorMsg(null);
-    if (!selectedAccount) {
-      setErrorMsg(
-        language === 'ur'
-          ? 'منتخب کردہ ادائیگی اکاؤنٹ دستیاب نہیں ہے۔ براہ کرم فعال اکاؤنٹ منتخب کریں۔'
-          : 'Selected payment account is no longer active. Please pick an active method.'
-      );
-      return;
-    }
-    if (!tid.trim()) {
-      setErrorMsg(language === 'ur' ? 'براہ کرم ٹرانزیکشن آئی ڈی (TID) درج کریں۔' : 'Please enter Transaction ID (TID)');
-      return;
-    }
+    await runMedicalLocked(async () => {
+      setErrorMsg(null);
+      if (!selectedAccount) {
+        setErrorMsg(
+          language === 'ur'
+            ? 'منتخب کردہ ادائیگی اکاؤنٹ دستیاب نہیں ہے۔ براہ کرم فعال اکاؤنٹ منتخب کریں۔'
+            : 'Selected payment account is no longer active. Please pick an active method.'
+        );
+        return;
+      }
+      const cleanTid = normalizeTrxId(tid);
+      if (!cleanTid) {
+        setErrorMsg(language === 'ur' ? 'براہ کرم ٹرانزیکشن آئی ڈی (TID) درج کریں۔' : 'Please enter Transaction ID (TID)');
+        return;
+      }
 
-    setIsSubmitting(true);
-    try {
-      await apiSubmitMedicalPaymentTid({
-        userId: user.id,
-        userEmail: user.email,
-        userName: user.fullName,
-        userPhone: user.phone,
-        shedId: alert.shedId,
-        alertId: alert.id,
-        hensCount: userHensInShed,
-        perHenRate: feeCalc.perHenRate,
-        amount: requiredAmount,
-        paymentMethod: selectedAccount.type,
-        tid: tid.trim(),
-        senderName: senderName.trim(),
-        senderNumber: senderNumber.trim(),
-      });
+      try {
+        await apiSubmitMedicalPaymentTid({
+          userId: user.id,
+          userEmail: user.email,
+          userName: user.fullName,
+          userPhone: user.phone,
+          shedId: alert.shedId,
+          alertId: alert.id,
+          hensCount: userHensInShed,
+          perHenRate: feeCalc.perHenRate,
+          amount: requiredAmount,
+          paymentMethod: selectedAccount.type,
+          tid: cleanTid,
+          senderName: senderName.trim(),
+          senderNumber: senderNumber.trim(),
+        });
 
-      setSuccessMsg(t[language].medicalTidSubmittedNotice);
-      setTimeout(() => {
-        onSuccess();
-        onClose();
-      }, 2000);
-    } catch (err: any) {
-      setErrorMsg(getFriendlyErrorMessage(err, language));
-    } finally {
-      setIsSubmitting(false);
-    }
+        setSuccessMsg(t[language].medicalTidSubmittedNotice);
+        setTimeout(() => {
+          onSuccess();
+          onClose();
+        }, 2000);
+      } catch (err: any) {
+        setErrorMsg(getFriendlyErrorMessage(err, language));
+      }
+    });
   };
 
   return (
@@ -296,9 +297,9 @@ export const MedicalPaymentModal: React.FC<MedicalPaymentModalProps> = ({
                 type="button"
                 onClick={handleWalletPay}
                 disabled={isSubmitting}
-                className="w-full py-3 px-4 rounded-xl font-bold text-sm bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-[#04140d] shadow-lg transition-all flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
+                className="w-full py-3 px-4 rounded-xl font-bold text-sm bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-[#04140d] shadow-lg transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
               >
-                <CheckCircle2 className="w-4 h-4" />
+                {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
                 {isSubmitting
                   ? language === 'ur'
                     ? 'ادائیگی جاری ہے...'
@@ -418,9 +419,9 @@ export const MedicalPaymentModal: React.FC<MedicalPaymentModalProps> = ({
             <button
               type="submit"
               disabled={isSubmitting}
-              className="w-full py-3 px-4 rounded-xl font-bold text-sm bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-[#04140d] shadow-lg transition-all flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
+              className="w-full py-3 px-4 rounded-xl font-bold text-sm bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-[#04140d] shadow-lg transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
             >
-              <CheckCircle2 className="w-4 h-4" />
+              {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
               {isSubmitting
                 ? language === 'ur'
                   ? 'جمع کیا جا رہا ہے...'

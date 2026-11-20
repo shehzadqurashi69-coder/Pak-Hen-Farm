@@ -73,6 +73,7 @@ import {
   DEFAULT_FARM_PROFILE,
   validateMediaUploadFile,
 } from '../utils/farmRules';
+import { useKeyedActionLock } from '../utils/actionLock';
 import { t } from '../utils/translations';
 import {
   ShieldCheck,
@@ -127,6 +128,7 @@ import {
   Film,
   Video,
   Play,
+  Loader2,
 } from 'lucide-react';
 
 interface AdminPortalProps {
@@ -279,8 +281,9 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
   // Search filter for Users Directory
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Prevent multiple package approvals for a single TID / double clicking
-  const [approvingOrderIds, setApprovingOrderIds] = useState<Record<string, boolean>>({});
+  // Prevent multiple package/withdrawal approvals or rejections from rapid double-clicks
+  const { isKeyLocked: isOrderLocked, runKeyLocked: runOrderLocked } = useKeyedActionLock();
+  const { isKeyLocked: isWithdrawalLocked, runKeyLocked: runWithdrawalLocked } = useKeyedActionLock();
 
   // User Management state
   const [updatingUserId, setUpdatingUserId] = useState<string | null>(null);
@@ -483,133 +486,139 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
   };
 
   const handleApproveOrder = async (orderId: string) => {
-    if (approvingOrderIds[orderId]) return;
-    setOrderActionMessage(null);
-    setOrderActionError(null);
-    setTabError(null);
-    setApprovingOrderIds((prev) => ({ ...prev, [orderId]: true }));
-    try {
-      // Optimized approval: reads & updates ONLY the specific order, buyer user, and assigned shed.
-      const summary = await apiApproveOrder(adminUser, orderId, 'Verified and approved by Admin');
-      const nowIso = new Date().toISOString();
-      setOrders((prev) =>
-        prev.map((o) =>
-          o.id === orderId
-            ? { ...o, status: 'approved', processedAt: nowIso, adminNote: 'Verified and approved by Admin' }
-            : o
-        )
-      );
-      const updatedBuyer = summary?.updatedUser;
-      if (updatedBuyer?.id) {
-        setUsersList((prev) =>
-          prev.map((u) => (u.id === updatedBuyer.id ? updatedBuyer : u))
+    await runOrderLocked(orderId, async () => {
+      setOrderActionMessage(null);
+      setOrderActionError(null);
+      setTabError(null);
+      try {
+        // Optimized approval: reads & updates ONLY the specific order, buyer user, and assigned shed.
+        const summary = await apiApproveOrder(adminUser, orderId, 'Verified and approved by Admin');
+        const nowIso = new Date().toISOString();
+        setOrders((prev) =>
+          prev.map((o) =>
+            o.id === orderId
+              ? { ...o, status: 'approved', processedAt: nowIso, adminNote: 'Verified and approved by Admin' }
+              : o
+          )
         );
+        const updatedBuyer = summary?.updatedUser;
+        if (updatedBuyer?.id) {
+          setUsersList((prev) =>
+            prev.map((u) => (u.id === updatedBuyer.id ? updatedBuyer : u))
+          );
+        }
+        setOrderActionMessage(
+          isUr
+            ? `آرڈر منظور ہو گیا! +${summary.hensCount} مرغیاں (Rs. ${summary.amount.toLocaleString()}) کو ${summary.assignedShedId} میں شامل کر دیا گیا۔`
+            : `Order approved! +${summary.hensCount} ${summary.hensCount === 1 ? 'Hen' : 'Hens'} (PKR ${summary.amount.toLocaleString()}) assigned to ${summary.assignedShedId}.`
+        );
+        setTimeout(() => setOrderActionMessage(null), 5000);
+      } catch (err: any) {
+        setOrderActionError(getFriendlyErrorMessage(err, lang));
       }
-      setOrderActionMessage(
-        isUr
-          ? `آرڈر منظور ہو گیا! +${summary.hensCount} مرغیاں (Rs. ${summary.amount.toLocaleString()}) کو ${summary.assignedShedId} میں شامل کر دیا گیا۔`
-          : `Order approved! +${summary.hensCount} ${summary.hensCount === 1 ? 'Hen' : 'Hens'} (PKR ${summary.amount.toLocaleString()}) assigned to ${summary.assignedShedId}.`
-      );
-      setTimeout(() => setOrderActionMessage(null), 5000);
-    } catch (err: any) {
-      setOrderActionError(getFriendlyErrorMessage(err, lang));
-    } finally {
-      setApprovingOrderIds((prev) => {
-        const next = { ...prev };
-        delete next[orderId];
-        return next;
-      });
-    }
+    });
   };
 
   const handleOpenRejectOrder = (order: HenOrder) => {
+    if (isOrderLocked(order.id)) return;
     setOrderActionError(null);
     setRejectOrderTarget(order);
     setActionReasonNote('Payment slip or TxID could not be verified');
   };
 
   const handleConfirmRejectOrder = async () => {
-    if (!rejectOrderTarget) return;
-    setOrderActionMessage(null);
-    setOrderActionError(null);
-    try {
-      setIsProcessingAction(true);
-      const note = actionReasonNote || 'Payment not verified';
-      await apiRejectOrder(adminUser, rejectOrderTarget.id, note);
-      const rejectedId = rejectOrderTarget.id;
-      setOrders((prev) =>
-        prev.map((o) =>
-          o.id === rejectedId
-            ? { ...o, status: 'rejected', processedAt: new Date().toISOString(), adminNote: note }
-            : o
-        )
-      );
-      setRejectOrderTarget(null);
-      setOrderActionMessage(
-        isUr
-          ? `آرڈر (${rejectedId}) مسترد کر دیا گیا۔`
-          : `Order (${rejectedId}) marked as rejected.`
-      );
-      setTimeout(() => setOrderActionMessage(null), 4000);
-    } catch (err: any) {
-      setOrderActionError(getFriendlyErrorMessage(err, lang));
-    } finally {
-      setIsProcessingAction(false);
-    }
+    const target = rejectOrderTarget;
+    if (!target) return;
+    await runOrderLocked(target.id, async () => {
+      setOrderActionMessage(null);
+      setOrderActionError(null);
+      try {
+        setIsProcessingAction(true);
+        const note = actionReasonNote || 'Payment not verified';
+        await apiRejectOrder(adminUser, target.id, note);
+        const rejectedId = target.id;
+        setOrders((prev) =>
+          prev.map((o) =>
+            o.id === rejectedId
+              ? { ...o, status: 'rejected', processedAt: new Date().toISOString(), adminNote: note }
+              : o
+          )
+        );
+        setRejectOrderTarget(null);
+        setOrderActionMessage(
+          isUr
+            ? `آرڈر (${rejectedId}) مسترد کر دیا گیا۔`
+            : `Order (${rejectedId}) marked as rejected.`
+        );
+        setTimeout(() => setOrderActionMessage(null), 4000);
+      } catch (err: any) {
+        setOrderActionError(getFriendlyErrorMessage(err, lang));
+      } finally {
+        setIsProcessingAction(false);
+      }
+    });
   };
 
   const handleOpenMarkPaid = (w: WithdrawalRequest) => {
+    if (isWithdrawalLocked(w.id)) return;
     setMarkPaidTarget(w);
     setActionReasonNote(`Dispatched via Easypaisa to ${w.easypaisaNumber}`);
   };
 
   const handleConfirmMarkPaid = async () => {
-    if (!markPaidTarget) return;
-    setTabError(null);
-    try {
-      setIsProcessingAction(true);
-      const note = actionReasonNote || 'Dispatched via Easypaisa';
-      await apiMarkWithdrawalPaid(adminUser, markPaidTarget.id, note);
-      const paidId = markPaidTarget.id;
-      setWithdrawals((prev) =>
-        prev.map((w) =>
-          w.id === paidId ? { ...w, status: 'paid', processedAt: new Date().toISOString(), adminNote: note } : w
-        )
-      );
-      setMarkPaidTarget(null);
-    } catch (err: any) {
-      setTabError(getFriendlyErrorMessage(err, lang));
-    } finally {
-      setIsProcessingAction(false);
-    }
+    const target = markPaidTarget;
+    if (!target) return;
+    await runWithdrawalLocked(target.id, async () => {
+      setTabError(null);
+      try {
+        setIsProcessingAction(true);
+        const note = actionReasonNote || 'Dispatched via Easypaisa';
+        await apiMarkWithdrawalPaid(adminUser, target.id, note);
+        const paidId = target.id;
+        setWithdrawals((prev) =>
+          prev.map((w) =>
+            w.id === paidId ? { ...w, status: 'paid', processedAt: new Date().toISOString(), adminNote: note } : w
+          )
+        );
+        setMarkPaidTarget(null);
+      } catch (err: any) {
+        setTabError(getFriendlyErrorMessage(err, lang));
+      } finally {
+        setIsProcessingAction(false);
+      }
+    });
   };
 
   const handleOpenRejectWithdrawal = (w: WithdrawalRequest) => {
+    if (isWithdrawalLocked(w.id)) return;
     setRejectWithdrawalTarget(w);
     setActionReasonNote('Account details mismatched or verification failed');
   };
 
   const handleConfirmRejectWithdrawal = async () => {
-    if (!rejectWithdrawalTarget) return;
-    setTabError(null);
-    try {
-      setIsProcessingAction(true);
-      const reason = actionReasonNote || 'Rejected by Admin';
-      await apiRejectWithdrawal(adminUser, rejectWithdrawalTarget.id, reason);
-      const rejectedId = rejectWithdrawalTarget.id;
-      setWithdrawals((prev) =>
-        prev.map((w) =>
-          w.id === rejectedId
-            ? { ...w, status: 'rejected', processedAt: new Date().toISOString(), adminNote: reason }
-            : w
-        )
-      );
-      setRejectWithdrawalTarget(null);
-    } catch (err: any) {
-      setTabError(getFriendlyErrorMessage(err, lang));
-    } finally {
-      setIsProcessingAction(false);
-    }
+    const target = rejectWithdrawalTarget;
+    if (!target) return;
+    await runWithdrawalLocked(target.id, async () => {
+      setTabError(null);
+      try {
+        setIsProcessingAction(true);
+        const reason = actionReasonNote || 'Rejected by Admin';
+        await apiRejectWithdrawal(adminUser, target.id, reason);
+        const rejectedId = target.id;
+        setWithdrawals((prev) =>
+          prev.map((w) =>
+            w.id === rejectedId
+              ? { ...w, status: 'rejected', processedAt: new Date().toISOString(), adminNote: reason }
+              : w
+          )
+        );
+        setRejectWithdrawalTarget(null);
+      } catch (err: any) {
+        setTabError(getFriendlyErrorMessage(err, lang));
+      } finally {
+        setIsProcessingAction(false);
+      }
+    });
   };
 
   // Payment Methods Form Actions
@@ -2240,8 +2249,8 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
                         <button
                           type="button"
                           onClick={() => handleOpenRejectOrder(ord)}
-                          disabled={!!approvingOrderIds[ord.id]}
-                          className="admin-btn-danger text-xs disabled:opacity-50"
+                          disabled={isOrderLocked(ord.id)}
+                          className="admin-btn-danger text-xs disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                           <XCircle className="h-4 w-4" />
                           <span>{strings.rejectBtn}</span>
@@ -2250,13 +2259,13 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
                         <button
                           type="button"
                           onClick={() => handleApproveOrder(ord.id)}
-                          disabled={!!approvingOrderIds[ord.id]}
-                          className="admin-btn-primary text-xs disabled:opacity-50"
+                          disabled={isOrderLocked(ord.id)}
+                          className="admin-btn-primary text-xs disabled:opacity-50 disabled:cursor-not-allowed"
                         >
-                          {approvingOrderIds[ord.id] ? (
+                          {isOrderLocked(ord.id) ? (
                             <>
-                              <div className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-[#051a10] border-t-transparent" />
-                              <span>{isUr ? 'منظوری جاری ہے...' : 'Approving...'}</span>
+                              <Loader2 className="h-3.5 w-3.5 animate-spin text-[#051a10]" />
+                              <span>{isUr ? 'عمل جاری ہے...' : 'Processing...'}</span>
                             </>
                           ) : (
                             <>
@@ -2354,21 +2363,36 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
                       {/* ACTIVATED REJECT & REFUND BUTTON (NO window.prompt) */}
                       <button
                         type="button"
+                        disabled={isWithdrawalLocked(w.id)}
                         onClick={() => handleOpenRejectWithdrawal(w)}
-                        className="admin-btn-danger text-xs"
+                        className="admin-btn-danger text-xs disabled:opacity-50 disabled:cursor-not-allowed"
                       >
-                        <XCircle className="h-4 w-4" />
+                        {isWithdrawalLocked(w.id) ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <XCircle className="h-4 w-4" />
+                        )}
                         <span>{isUr ? 'مسترد اور رقم والٹ میں واپس' : 'Reject & Refund'}</span>
                       </button>
 
                       {/* ACTIVATED MARK PAID BUTTON (NO window.prompt) */}
                       <button
                         type="button"
+                        disabled={isWithdrawalLocked(w.id)}
                         onClick={() => handleOpenMarkPaid(w)}
-                        className="admin-btn-primary text-xs"
+                        className="admin-btn-primary text-xs disabled:opacity-50 disabled:cursor-not-allowed"
                       >
-                        <CheckCircle2 className="h-4 w-4" />
-                        <span>{strings.markAsPaidBtn}</span>
+                        {isWithdrawalLocked(w.id) ? (
+                          <>
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                            <span>{isUr ? 'عمل جاری ہے...' : 'Processing...'}</span>
+                          </>
+                        ) : (
+                          <>
+                            <CheckCircle2 className="h-4 w-4" />
+                            <span>{strings.markAsPaidBtn}</span>
+                          </>
+                        )}
                       </button>
                     </div>
                   )}
@@ -5025,19 +5049,32 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
             <div className="flex items-center justify-end gap-2.5 pt-2">
               <button
                 type="button"
+                disabled={isProcessingAction || isOrderLocked(rejectOrderTarget.id)}
                 onClick={() => setRejectOrderTarget(null)}
-                className="rounded-xl border border-white/10 px-4 py-2.5 text-xs font-bold text-[#f4efe6]/70 hover:bg-white/5 transition-colors cursor-pointer"
+                className="rounded-xl border border-white/10 px-4 py-2.5 text-xs font-bold text-[#f4efe6]/70 hover:bg-white/5 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {isUr ? 'منسوخ' : 'Cancel'}
               </button>
               <button
                 type="button"
-                disabled={isProcessingAction}
+                disabled={isProcessingAction || isOrderLocked(rejectOrderTarget.id)}
                 onClick={handleConfirmRejectOrder}
-                className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-rose-600 to-rose-700 px-5 py-2.5 text-xs font-black text-white hover:brightness-110 active:scale-95 transition-all cursor-pointer shadow-lg shadow-rose-900/40 disabled:opacity-50"
+                className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-rose-600 to-rose-700 px-5 py-2.5 text-xs font-black text-white hover:brightness-110 active:scale-95 transition-all cursor-pointer shadow-lg shadow-rose-900/40 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <XCircle className="h-4 w-4" />
-                <span>{isProcessingAction ? (isUr ? 'عمل جاری ہے...' : 'Rejecting...') : (isUr ? 'تصدیق و مسترد' : 'Confirm Reject')}</span>
+                {isProcessingAction || isOrderLocked(rejectOrderTarget.id) ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <XCircle className="h-4 w-4" />
+                )}
+                <span>
+                  {isProcessingAction || isOrderLocked(rejectOrderTarget.id)
+                    ? isUr
+                      ? 'عمل جاری ہے...'
+                      : 'Rejecting...'
+                    : isUr
+                    ? 'تصدیق و مسترد'
+                    : 'Confirm Reject'}
+                </span>
               </button>
             </div>
           </div>
@@ -5098,19 +5135,32 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
             <div className="flex items-center justify-end gap-2.5 pt-2">
               <button
                 type="button"
+                disabled={isProcessingAction || isWithdrawalLocked(rejectWithdrawalTarget.id)}
                 onClick={() => setRejectWithdrawalTarget(null)}
-                className="rounded-xl border border-white/10 px-4 py-2.5 text-xs font-bold text-[#f4efe6]/70 hover:bg-white/5 transition-colors cursor-pointer"
+                className="rounded-xl border border-white/10 px-4 py-2.5 text-xs font-bold text-[#f4efe6]/70 hover:bg-white/5 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {isUr ? 'منسوخ' : 'Cancel'}
               </button>
               <button
                 type="button"
-                disabled={isProcessingAction}
+                disabled={isProcessingAction || isWithdrawalLocked(rejectWithdrawalTarget.id)}
                 onClick={handleConfirmRejectWithdrawal}
-                className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-amber-600 via-amber-500 to-amber-600 px-5 py-2.5 text-xs font-black text-[#0c0802] hover:brightness-110 active:scale-95 transition-all cursor-pointer shadow-lg shadow-amber-900/40 disabled:opacity-50"
+                className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-amber-600 via-amber-500 to-amber-600 px-5 py-2.5 text-xs font-black text-[#0c0802] hover:brightness-110 active:scale-95 transition-all cursor-pointer shadow-lg shadow-amber-900/40 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <RotateCcw className="h-4 w-4" />
-                <span>{isProcessingAction ? (isUr ? 'عمل جاری ہے...' : 'Refunding...') : (isUr ? 'مسترد اور ریفنڈ کریں' : 'Confirm Reject & Refund')}</span>
+                {isProcessingAction || isWithdrawalLocked(rejectWithdrawalTarget.id) ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <RotateCcw className="h-4 w-4" />
+                )}
+                <span>
+                  {isProcessingAction || isWithdrawalLocked(rejectWithdrawalTarget.id)
+                    ? isUr
+                      ? 'عمل جاری ہے...'
+                      : 'Refunding...'
+                    : isUr
+                    ? 'مسترد اور ریفنڈ کریں'
+                    : 'Confirm Reject & Refund'}
+                </span>
               </button>
             </div>
           </div>
@@ -5165,19 +5215,32 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ adminUser, lang, farmP
             <div className="flex items-center justify-end gap-2.5 pt-2">
               <button
                 type="button"
+                disabled={isProcessingAction || isWithdrawalLocked(markPaidTarget.id)}
                 onClick={() => setMarkPaidTarget(null)}
-                className="rounded-xl border border-white/10 px-4 py-2.5 text-xs font-bold text-[#f4efe6]/70 hover:bg-white/5 transition-colors cursor-pointer"
+                className="rounded-xl border border-white/10 px-4 py-2.5 text-xs font-bold text-[#f4efe6]/70 hover:bg-white/5 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {isUr ? 'منسوخ' : 'Cancel'}
               </button>
               <button
                 type="button"
-                disabled={isProcessingAction}
+                disabled={isProcessingAction || isWithdrawalLocked(markPaidTarget.id)}
                 onClick={handleConfirmMarkPaid}
-                className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-emerald-500 to-emerald-600 px-5 py-2.5 text-xs font-black text-white hover:brightness-110 active:scale-95 transition-all cursor-pointer shadow-lg shadow-emerald-900/40 disabled:opacity-50"
+                className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-emerald-500 to-emerald-600 px-5 py-2.5 text-xs font-black text-white hover:brightness-110 active:scale-95 transition-all cursor-pointer shadow-lg shadow-emerald-900/40 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <CheckCircle2 className="h-4 w-4" />
-                <span>{isProcessingAction ? (isUr ? 'محفوظ ہو رہا ہے...' : 'Processing...') : (isUr ? 'تصدیق و محفوظ' : 'Confirm Paid')}</span>
+                {isProcessingAction || isWithdrawalLocked(markPaidTarget.id) ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <CheckCircle2 className="h-4 w-4" />
+                )}
+                <span>
+                  {isProcessingAction || isWithdrawalLocked(markPaidTarget.id)
+                    ? isUr
+                      ? 'محفوظ ہو رہا ہے...'
+                      : 'Processing...'
+                    : isUr
+                    ? 'تصدیق و محفوظ'
+                    : 'Confirm Paid'}
+                </span>
               </button>
             </div>
           </div>

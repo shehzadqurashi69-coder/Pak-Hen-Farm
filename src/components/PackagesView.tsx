@@ -10,6 +10,7 @@ import {
   getFriendlyErrorMessage,
 } from '../services/api';
 import { PaymentLogo } from './PaymentLogos';
+import { useActionLock, normalizeTrxId } from '../utils/actionLock';
 import { t } from '../utils/translations';
 import {
   Check,
@@ -35,6 +36,7 @@ import {
   Smartphone,
   FileCheck,
   RefreshCw,
+  Loader2,
 } from 'lucide-react';
 
 interface PackagesViewProps {
@@ -71,7 +73,8 @@ export const PackagesView: React.FC<PackagesViewProps> = ({ user, onOrderPlaced,
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   const [userOrders, setUserOrders] = useState<HenOrder[]>([]);
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const { isSubmitting, runLocked: runSubmitOrderLocked } = useActionLock();
+  const { isSubmitting: isContinuingToPayment, runLocked: runContinueLocked } = useActionLock();
   const [submitStage, setSubmitStage] = useState<'' | 'uploading_slip' | 'saving_order'>('');
 
   const userLocked = isUserLocked(user);
@@ -188,103 +191,104 @@ export const PackagesView: React.FC<PackagesViewProps> = ({ user, onOrderPlaced,
 
   const handleSubmitTid = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSubmitting || isCompressingSlip) return; // Strict debouncing: block rapid clicks
-    setErrorMsg('');
-    setSuccessMsg('');
+    if (isCompressingSlip) return;
 
-    if (userLocked) {
-      setErrorMsg(strings.lockedBuyBtn.replace('{status}', user.status || 'suspended'));
-      return;
-    }
+    await runSubmitOrderLocked(async () => {
+      setErrorMsg('');
+      setSuccessMsg('');
 
-    if (!activeMethod || paymentMethods.length === 0) {
-      setErrorMsg(
-        isUr
-          ? 'اس وقت کوئی فعال ادائیگی اکاؤنٹ دستیاب نہیں ہے۔ براہ کرم ایڈمن سے رابطہ کریں۔'
-          : 'No active payment account is currently enabled. Please contact Admin before submitting a deposit.'
-      );
-      return;
-    }
-
-    const cleanTid = tid.trim();
-    const cleanTitle = senderTitle.trim();
-    const cleanNumber = senderNumber.trim();
-
-    if (!cleanTid || cleanTid.length < 3) {
-      setErrorMsg(
-        isUr
-          ? 'براہ کرم کم از کم 3 حروف یا ہندسوں پر مشتمل درست ٹرانزیکشن ہیش / TID درج کریں۔'
-          : 'Please enter a valid Transaction ID (TxID) / Reference number (at least 3 characters).'
-      );
-      return;
-    }
-
-    // MANDATORY REQUIREMENT: Payment Slip / Screenshot upload
-    if (!proofSlipBase64 || !proofSlipFile) {
-      setErrorMsg(
-        isUr
-          ? 'براہ کرم ادائیگی کی رسید / اسکرین شاٹ لازمی اپ لوڈ کریں۔'
-          : 'Mandatory: Please upload your payment slip / transfer screenshot before submitting.'
-      );
-      return;
-    }
-
-    try {
-      setIsSubmitting(true);
-      setSubmitStage('uploading_slip');
-
-      // Step 1: Upload compressed slip to server (/uploads/slips/...) with automatic size-capped fallback
-      const uploadedSlip = await uploadPaymentSlipForOrder(proofSlipFile, proofSlipBase64);
-
-      // Step 2: Validate final order payload before saving to Firestore (works for 1 hen, Rs. 4,000, Rs. 8,000, 100 hens, etc.)
-      const validation = validateOrderSubmissionPayload({
-        hensCount: quantity,
-        amount: calculatedTotal,
-        tid: cleanTid,
-        proofSlipUrl: uploadedSlip.proofSlipUrl,
-      });
-      if (!validation.valid) {
-        throw new Error(isUr ? (validation.errorUr || validation.error) : validation.error);
+      if (userLocked) {
+        setErrorMsg(strings.lockedBuyBtn.replace('{status}', user.status || 'suspended'));
+        return;
       }
 
-      setSubmitStage('saving_order');
-      const order = await apiCreateOrder(user, {
-        packageId: `partner-flock-${quantity}-hens`,
-        hensCount: quantity,
-        amount: calculatedTotal,
-        senderEasypaisaNumber: cleanNumber || user.phone || '',
-        senderEasypaisaTitle: cleanTitle || user.fullName || '',
-        tid: cleanTid,
-        paymentMethodId: activeMethod.id,
-        paymentMethodTitle: activeMethod.title,
-        proofSlipUrl: uploadedSlip.proofSlipUrl,
-        proofSlipSizeBytes: uploadedSlip.sizeBytes,
-      });
+      if (!activeMethod || paymentMethods.length === 0) {
+        setErrorMsg(
+          isUr
+            ? 'اس وقت کوئی فعال ادائیگی اکاؤنٹ دستیاب نہیں ہے۔ براہ کرم ایڈمن سے رابطہ کریں۔'
+            : 'No active payment account is currently enabled. Please contact Admin before submitting a deposit.'
+        );
+        return;
+      }
 
-      setUserOrders((prev) => [order, ...prev.filter((o) => o.id !== order.id)]);
-      setSuccessMsg(
-        isUr
-          ? `${strings.orderSubmittedSuccess} (${quantity} مرغیاں • Rs. ${calculatedTotal.toLocaleString()} • TID: ${cleanTid})`
-          : `${strings.orderSubmittedSuccess} (${quantity} ${quantity === 1 ? 'Hen' : 'Hens'} • PKR ${calculatedTotal.toLocaleString()} • TID: ${cleanTid})`
-      );
-      onOrderPlaced(order);
-      setTid('');
-      setProofSlipBase64('');
-      setProofSlipFile(null);
-      setProofSlipMeta(null);
-      setSenderTitle(user.easypaisaTitle || '');
-      setSenderNumber(user.easypaisaNumber || '');
-      setTimeout(() => {
-        setCheckoutStep('select');
-        setSuccessMsg('');
-      }, 4000);
-    } catch (err: any) {
-      console.error('Order submission error:', err);
-      setErrorMsg(getFriendlyErrorMessage(err, lang));
-    } finally {
-      setIsSubmitting(false);
-      setSubmitStage('');
-    }
+      const cleanTid = normalizeTrxId(tid);
+      const cleanTitle = senderTitle.trim();
+      const cleanNumber = senderNumber.trim();
+
+      if (!cleanTid || cleanTid.length < 3) {
+        setErrorMsg(
+          isUr
+            ? 'براہ کرم کم از کم 3 حروف یا ہندسوں پر مشتمل درست ٹرانزیکشن ہیش / TID درج کریں۔'
+            : 'Please enter a valid Transaction ID (TxID) / Reference number (at least 3 characters).'
+        );
+        return;
+      }
+
+      // MANDATORY REQUIREMENT: Payment Slip / Screenshot upload
+      if (!proofSlipBase64 || !proofSlipFile) {
+        setErrorMsg(
+          isUr
+            ? 'براہ کرم ادائیگی کی رسید / اسکرین شاٹ لازمی اپ لوڈ کریں۔'
+            : 'Mandatory: Please upload your payment slip / transfer screenshot before submitting.'
+        );
+        return;
+      }
+
+      try {
+        setSubmitStage('uploading_slip');
+
+        // Step 1: Upload compressed slip to server (/uploads/slips/...) with automatic size-capped fallback
+        const uploadedSlip = await uploadPaymentSlipForOrder(proofSlipFile, proofSlipBase64);
+
+        // Step 2: Validate final order payload before saving to Firestore (works for 1 hen, Rs. 4,000, Rs. 8,000, 100 hens, etc.)
+        const validation = validateOrderSubmissionPayload({
+          hensCount: quantity,
+          amount: calculatedTotal,
+          tid: cleanTid,
+          proofSlipUrl: uploadedSlip.proofSlipUrl,
+        });
+        if (!validation.valid) {
+          throw new Error(isUr ? (validation.errorUr || validation.error) : validation.error);
+        }
+
+        setSubmitStage('saving_order');
+        const order = await apiCreateOrder(user, {
+          packageId: `partner-flock-${quantity}-hens`,
+          hensCount: quantity,
+          amount: calculatedTotal,
+          senderEasypaisaNumber: cleanNumber || user.phone || '',
+          senderEasypaisaTitle: cleanTitle || user.fullName || '',
+          tid: cleanTid,
+          paymentMethodId: activeMethod.id,
+          paymentMethodTitle: activeMethod.title,
+          proofSlipUrl: uploadedSlip.proofSlipUrl,
+          proofSlipSizeBytes: uploadedSlip.sizeBytes,
+        });
+
+        setUserOrders((prev) => [order, ...prev.filter((o) => o.id !== order.id)]);
+        setSuccessMsg(
+          isUr
+            ? `${strings.orderSubmittedSuccess} (${quantity} مرغیاں • Rs. ${calculatedTotal.toLocaleString()} • TID: ${cleanTid})`
+            : `${strings.orderSubmittedSuccess} (${quantity} ${quantity === 1 ? 'Hen' : 'Hens'} • PKR ${calculatedTotal.toLocaleString()} • TID: ${cleanTid})`
+        );
+        onOrderPlaced(order);
+        setTid('');
+        setProofSlipBase64('');
+        setProofSlipFile(null);
+        setProofSlipMeta(null);
+        setSenderTitle(user.easypaisaTitle || '');
+        setSenderNumber(user.easypaisaNumber || '');
+        setTimeout(() => {
+          setCheckoutStep('select');
+          setSuccessMsg('');
+        }, 4000);
+      } catch (err: any) {
+        console.error('Order submission error:', err);
+        setErrorMsg(getFriendlyErrorMessage(err, lang));
+      } finally {
+        setSubmitStage('');
+      }
+    });
   };
 
   return (
@@ -474,27 +478,35 @@ export const PackagesView: React.FC<PackagesViewProps> = ({ user, onOrderPlaced,
           <div>
             <button
               type="button"
-              disabled={!isHalalAgreed || userLocked}
+              disabled={!isHalalAgreed || userLocked || isContinuingToPayment || isSubmitting}
               onClick={() => {
-                if (isHalalAgreed && !userLocked) {
-                  setCheckoutStep('payment');
+                if (!isHalalAgreed || userLocked) return;
+                void runContinueLocked(async () => {
                   setErrorMsg('');
                   setSuccessMsg('');
-                }
+                  setCheckoutStep('payment');
+                });
               }}
               className={`w-full py-4 px-6 rounded-2xl text-sm sm:text-base font-black tracking-wide uppercase transition-all shadow-xl flex items-center justify-center gap-2 ${
                 userLocked
                   ? 'bg-rose-950/60 border border-rose-500/50 text-rose-300/80 cursor-not-allowed opacity-60'
-                  : isHalalAgreed
+                  : isHalalAgreed && !isContinuingToPayment && !isSubmitting
                   ? 'bg-gradient-to-r from-[#d4af37] via-[#f3df88] to-[#d4af37] text-[#051a10] hover:brightness-105 active:scale-98 shadow-[#d4af37]/30 cursor-pointer'
                   : 'bg-stone-800 border border-stone-700 text-stone-500 cursor-not-allowed opacity-50 shadow-none'
               }`}
             >
-              <span>
-                {userLocked
-                  ? strings.lockedBuyBtn.replace('{status}', user.status || 'suspended')
-                  : `CONTINUE TO PAYMENT (PKR ${calculatedTotal.toLocaleString()}) ->`}
-              </span>
+              {isContinuingToPayment ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <span>{isUr ? 'لوڈ ہو رہا ہے...' : 'Opening Payment...'}</span>
+                </>
+              ) : (
+                <span>
+                  {userLocked
+                    ? strings.lockedBuyBtn.replace('{status}', user.status || 'suspended')
+                    : `CONTINUE TO PAYMENT (PKR ${calculatedTotal.toLocaleString()}) ->`}
+                </span>
+              )}
             </button>
             {!isHalalAgreed && (
               <p className="text-[11px] text-center text-amber-300/70 mt-2">
@@ -542,8 +554,9 @@ export const PackagesView: React.FC<PackagesViewProps> = ({ user, onOrderPlaced,
             </div>
             <button
               type="button"
+              disabled={isSubmitting}
               onClick={() => setCheckoutStep('select')}
-              className="flex items-center gap-1.5 text-xs text-[#f3df88] hover:text-white cursor-pointer px-3 py-1.5 rounded-xl border border-[#d4af37]/40 bg-[#051a10]/80 transition-all hover:bg-[#d4af37]/20"
+              className="flex items-center gap-1.5 text-xs text-[#f3df88] hover:text-white cursor-pointer px-3 py-1.5 rounded-xl border border-[#d4af37]/40 bg-[#051a10]/80 transition-all hover:bg-[#d4af37]/20 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <ArrowLeft className="h-3.5 w-3.5" />
               <span>{isUr ? 'مرغیاں تبدیل کریں' : 'Change Quantity'}</span>
@@ -778,8 +791,9 @@ export const PackagesView: React.FC<PackagesViewProps> = ({ user, onOrderPlaced,
 
                   <button
                     type="button"
+                    disabled={isSubmitting}
                     onClick={handleRemoveProofSlip}
-                    className="flex items-center gap-1 px-3 py-1.5 rounded-lg border border-rose-500/40 bg-rose-950/40 text-rose-300 hover:bg-rose-900/60 text-xs font-semibold cursor-pointer"
+                    className="flex items-center gap-1 px-3 py-1.5 rounded-lg border border-rose-500/40 bg-rose-950/40 text-rose-300 hover:bg-rose-900/60 text-xs font-semibold cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                     <span>{isUr ? 'تبدیل کریں' : 'Remove'}</span>

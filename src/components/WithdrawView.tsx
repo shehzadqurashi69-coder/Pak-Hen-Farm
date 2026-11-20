@@ -16,6 +16,7 @@ import {
   getFriendlyErrorMessage,
 } from '../services/api';
 import { PaymentLogo } from './PaymentLogos';
+import { useActionLock } from '../utils/actionLock';
 import { t } from '../utils/translations';
 import {
   Wallet,
@@ -58,7 +59,7 @@ export const WithdrawView: React.FC<WithdrawViewProps> = ({
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   const [userWithdrawals, setUserWithdrawals] = useState<WithdrawalRequest[]>([]);
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const { isSubmitting, runLocked: runWithdrawLocked } = useActionLock();
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   // Dynamic labels and placeholders for payout gateways
@@ -145,66 +146,62 @@ export const WithdrawView: React.FC<WithdrawViewProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSubmitting) return; // Strict debouncing
-    setErrorMsg('');
-    setSuccessMsg('');
 
-    if (isUserLocked(user)) {
-      setErrorMsg(
-        `Your account is ${user.status || 'suspended'}. Withdrawals are strictly locked. Please contact Admin.`
-      );
-      return;
-    }
+    await runWithdrawLocked(async () => {
+      setErrorMsg('');
+      setSuccessMsg('');
 
-    try {
-      setIsSubmitting(true);
-
-      // Client-side pre-check using live synced balance; server-side runTransaction verifies authoritatively
-      const currentAuthoritativeBalance = liveBalance;
-
-      const validation = validateWithdrawal(parsedAmount, currentAuthoritativeBalance);
-      if (!validation.isValid) {
+      if (isUserLocked(user)) {
         setErrorMsg(
-          (isUr ? validation.errorUrdu || validation.error || '' : validation.error || '') +
-            ` (${isUr ? 'دستیاب بیلنس' : 'Live Available'}: Rs. ${currentAuthoritativeBalance.toLocaleString()})`
+          `Your account is ${user.status || 'suspended'}. Withdrawals are strictly locked. Please contact Admin.`
         );
-        setIsSubmitting(false);
         return;
       }
 
-      const cleanNum = accountNumber.trim();
-      const cleanTitle = accountTitle.trim();
+      try {
+        // Client-side pre-check using live synced balance; server-side runTransaction verifies authoritatively
+        const currentAuthoritativeBalance = liveBalance;
 
-      if (!cleanNum || !cleanTitle) {
-        setErrorMsg(
-          isUr
-            ? 'براہ کرم اکاؤنٹ کی مکمل تفصیلات (نام اور نمبر) درج کریں۔'
-            : 'Please provide account title and account / mobile number.'
-        );
-        setIsSubmitting(false);
-        return;
+        const validation = validateWithdrawal(parsedAmount, currentAuthoritativeBalance);
+        if (!validation.isValid) {
+          setErrorMsg(
+            (isUr ? validation.errorUrdu || validation.error || '' : validation.error || '') +
+              ` (${isUr ? 'دستیاب بیلنس' : 'Live Available'}: Rs. ${currentAuthoritativeBalance.toLocaleString()})`
+          );
+          return;
+        }
+
+        const cleanNum = accountNumber.trim();
+        const cleanTitle = accountTitle.trim();
+
+        if (!cleanNum || !cleanTitle) {
+          setErrorMsg(
+            isUr
+              ? 'براہ کرم اکاؤنٹ کی مکمل تفصیلات (نام اور نمبر) درج کریں۔'
+              : 'Please provide account title and account / mobile number.'
+          );
+          return;
+        }
+
+        const res = await apiCreateWithdrawal(user, {
+          amount: parsedAmount,
+          easypaisaNumber: cleanNum,
+          easypaisaTitle: `${cleanTitle} (${currentGwConfig.name}${bankName ? ` - ${bankName.trim()}` : ''})`,
+        });
+
+        setLiveBalance(res.updatedUser.walletBalance);
+        setUserWithdrawals((prev) => [res.withdrawal, ...prev.filter((w) => w.id !== res.withdrawal.id)]);
+        setSuccessMsg(strings.withdrawSubmittedSuccess);
+        onWithdrawalRequested(res.withdrawal, res.updatedUser);
+        setAmountStr('');
+
+        setTimeout(() => {
+          setSuccessMsg('');
+        }, 5000);
+      } catch (err: any) {
+        setErrorMsg(getFriendlyErrorMessage(err, lang));
       }
-
-      const res = await apiCreateWithdrawal(user, {
-        amount: parsedAmount,
-        easypaisaNumber: cleanNum,
-        easypaisaTitle: `${cleanTitle} (${currentGwConfig.name}${bankName ? ` - ${bankName.trim()}` : ''})`,
-      });
-
-      setLiveBalance(res.updatedUser.walletBalance);
-      setUserWithdrawals((prev) => [res.withdrawal, ...prev.filter((w) => w.id !== res.withdrawal.id)]);
-      setSuccessMsg(strings.withdrawSubmittedSuccess);
-      onWithdrawalRequested(res.withdrawal, res.updatedUser);
-      setAmountStr('');
-
-      setTimeout(() => {
-        setSuccessMsg('');
-      }, 5000);
-    } catch (err: any) {
-      setErrorMsg(getFriendlyErrorMessage(err, lang));
-    } finally {
-      setIsSubmitting(false);
-    }
+    });
   };
 
   return (

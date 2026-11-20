@@ -8,8 +8,9 @@ import {
   calculateMultiShedCollectionYield,
 } from '../utils/farmRules';
 import { apiCollectEggs } from '../services/api';
+import { useActionLock } from '../utils/actionLock';
 import { t } from '../utils/translations';
-import { Egg, Clock, Sparkles, CheckCircle2, AlertCircle, ShieldAlert } from 'lucide-react';
+import { Egg, Clock, Sparkles, CheckCircle2, AlertCircle, ShieldAlert, Loader2 } from 'lucide-react';
 
 interface CollectEggCardProps {
   user: UserAccount;
@@ -47,7 +48,7 @@ export const CollectEggCard: React.FC<CollectEggCardProps> = ({
     totalProfit?: number;
   } | null>(null);
   const [collectError, setCollectError] = useState<string | null>(null);
-  const [collecting, setCollecting] = useState(false);
+  const { isSubmitting: collecting, runLocked: runCollectLocked } = useActionLock();
 
   // Re-calculate eligibility on tick
   useEffect(() => {
@@ -76,33 +77,32 @@ export const CollectEggCard: React.FC<CollectEggCardProps> = ({
   const effectiveNetCash = multiShedYield.finalWalletCredit;
 
   const handleCollect = async () => {
-    if (!eligibility.canCollect || collecting || userLocked) return;
+    if (!eligibility.canCollect || userLocked) return;
 
-    try {
-      setCollecting(true);
-      setCollectError(null);
-      const res = await apiCollectEggs(user);
-      setSuccessInfo({
-        eggs: res.record.eggsCollected,
-        cash: res.record.cashEarned,
-        normalIncome: res.record.normalIncome,
-        shedLossDeduction: res.record.shedLossDeduction,
-        crackedEggsLost: res.record.crackedEggsLost,
-        shedBreakdown: res.record.shedBreakdown,
-        missedDays: res.missedDays,
-        totalProfit: res.totalProfit,
-      });
-      onCollected(res.record, res.updatedUser);
+    await runCollectLocked(async () => {
+      try {
+        setCollectError(null);
+        const res = await apiCollectEggs(user);
+        setSuccessInfo({
+          eggs: res.record.eggsCollected,
+          cash: res.record.cashEarned,
+          normalIncome: res.record.normalIncome,
+          shedLossDeduction: res.record.shedLossDeduction,
+          crackedEggsLost: res.record.crackedEggsLost,
+          shedBreakdown: res.record.shedBreakdown,
+          missedDays: res.missedDays,
+          totalProfit: res.totalProfit,
+        });
+        onCollected(res.record, res.updatedUser);
 
-      setTimeout(() => {
-        setSuccessInfo(null);
-      }, 8000);
-    } catch (err: any) {
-      setCollectError(err.message || 'Error collecting eggs');
-      setTimeout(() => setCollectError(null), 6000);
-    } finally {
-      setCollecting(false);
-    }
+        setTimeout(() => {
+          setSuccessInfo(null);
+        }, 8000);
+      } catch (err: any) {
+        setCollectError(err.message || 'Error collecting eggs');
+        setTimeout(() => setCollectError(null), 6000);
+      }
+    });
   };
 
   const formatTimer = (h: number, m: number, s: number) => {
@@ -285,17 +285,29 @@ export const CollectEggCard: React.FC<CollectEggCardProps> = ({
         {!userLocked && user.activeHens > 0 && !hasUnpaidMedical && eligibility.canCollect && (
           <div className="pt-2 space-y-2.5">
             <button
+              type="button"
               onClick={handleCollect}
               disabled={collecting}
-              className="w-full relative group overflow-hidden rounded-2xl bg-gradient-to-r from-[#d4af37] via-[#f3df88] to-[#d4af37] p-4 sm:p-5 text-[#051a10] shadow-xl shadow-[#d4af37]/30 hover:brightness-105 active:scale-[0.98] transition-all cursor-pointer font-black text-base sm:text-lg flex items-center justify-center gap-3 border-2 border-[#fff2b2]"
+              className="w-full relative group overflow-hidden rounded-2xl bg-gradient-to-r from-[#d4af37] via-[#f3df88] to-[#d4af37] p-4 sm:p-5 text-[#051a10] shadow-xl shadow-[#d4af37]/30 hover:brightness-105 active:scale-[0.98] transition-all cursor-pointer font-black text-base sm:text-lg flex items-center justify-center gap-3 border-2 border-[#fff2b2] disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100"
             >
-              <Egg className="h-6 w-6 sm:h-7 sm:w-7 text-[#051a10] group-hover:scale-110 transition-transform" />
-              <span>
-                {isUr
-                  ? `ابھی ${effectiveEggs} انڈے وصول کریں (+Rs. ${effectiveNetCash.toLocaleString()})`
-                  : `Collect Now: ${effectiveEggs} Eggs (+Rs. ${effectiveNetCash.toLocaleString()})`}
-              </span>
-              <Sparkles className="h-5 w-5 text-[#051a10] group-hover:rotate-12 transition-transform" />
+              {collecting ? (
+                <>
+                  <Loader2 className="h-6 w-6 sm:h-7 sm:w-7 text-[#051a10] animate-spin" />
+                  <span>
+                    {isUr ? 'انڈے وصول کیے جا رہے ہیں...' : 'Collecting Daily Eggs...'}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <Egg className="h-6 w-6 sm:h-7 sm:w-7 text-[#051a10] group-hover:scale-110 transition-transform" />
+                  <span>
+                    {isUr
+                      ? `ابھی ${effectiveEggs} انڈے وصول کریں (+Rs. ${effectiveNetCash.toLocaleString()})`
+                      : `Collect Now: ${effectiveEggs} Eggs (+Rs. ${effectiveNetCash.toLocaleString()})`}
+                  </span>
+                  <Sparkles className="h-5 w-5 text-[#051a10] group-hover:rotate-12 transition-transform" />
+                </>
+              )}
             </button>
             {multiShedYield.hasLoss && (
               <div className="rounded-xl border border-amber-500/35 bg-[#051a10]/80 px-3.5 py-2.5 text-[11px] space-y-1">
